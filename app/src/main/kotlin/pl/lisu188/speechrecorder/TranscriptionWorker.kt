@@ -13,6 +13,7 @@ class TranscriptionWorker(
 ) : Worker(appContext, params) {
     override fun doWork(): Result {
         if (!TranscriptionSettings.autoTranscribe(applicationContext)) return Result.success()
+        if (!TranscriptFolderAccess.hasAccess(applicationContext)) return Result.success()
 
         val audioUri = inputData.getString(INPUT_AUDIO_URI)?.let(Uri::parse) ?: return Result.failure()
         val apiKey = OpenAiKeyStore.load(applicationContext) ?: return Result.success()
