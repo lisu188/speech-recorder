@@ -1,0 +1,46 @@
+name: Build Speech Recorder Release
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-37" "build-tools;36.0.0"
+
+      - name: Build release APK
+        run: gradle --no-daemon :app:assembleRelease
+
+      - name: Prepare artifact
+        run: cp app/build/outputs/apk/release/app-release-unsigned.apk SpeechRecorder-release-unsigned.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpeechRecorder-Release-Unsigned
+          path: SpeechRecorder-release-unsigned.apk
+          if-no-files-found: error
