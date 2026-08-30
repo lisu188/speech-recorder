@@ -115,7 +115,7 @@ class TranscriptStore(private val context: Context) {
         resolver.query(
             collection,
             projection,
-            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?",
+            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? AND ${MediaStore.MediaColumns.IS_PENDING}=0",
             arrayOf(RELATIVE_PATH_QUERY, "%.txt"),
             null,
         )?.use { cursor ->
@@ -123,10 +123,10 @@ class TranscriptStore(private val context: Context) {
             val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             while (cursor.moveToNext()) {
                 val name = cursor.getString(nameColumn)
-                if (!name.endsWith(".txt", ignoreCase = true)) continue
+                if (!name.endsWith(".txt", ignoreCase = true) || name.startsWith("pending_")) continue
                 val uri = ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
                 val text = readText(uri)
-                result[name.removeSuffix(".txt")] = TranscriptDocument(
+                result[name.dropLast(4)] = TranscriptDocument(
                     uri = uri,
                     displayName = name,
                     text = text,
@@ -275,8 +275,8 @@ class TranscriptStore(private val context: Context) {
     )
 
     companion object {
-        const val RELATIVE_PATH = "${Environment.DIRECTORY_MUSIC}/SpeechRecorder"
-        const val RELATIVE_PATH_QUERY = "$RELATIVE_PATH/"
+        val RELATIVE_PATH: String = "${Environment.DIRECTORY_MUSIC}/SpeechRecorder"
+        val RELATIVE_PATH_QUERY: String = "$RELATIVE_PATH/"
         private const val MAX_TITLE_LENGTH = 60
     }
 }
