@@ -2,8 +2,13 @@
 
 Lokalny dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Po uruchomieniu działa jako foreground service i nie wymaga połączenia z siecią.
 
-- wersja 1.2.0
-- Android 10+
+- wersja 1.3.0
+- Kotlin 2.4.10
+- Android Gradle Plugin 9.3.2 z wbudowanym Kotlinem
+- compileSdk / targetSdk 37 (Android 17)
+- minSdk 29 (Android 10)
+- Gradle 9.5.0 w CI
+- JDK 17
 - 16 kHz mono PCM WAV
 - 5 s pre-buffer
 - 8 s ciszy kończy klip
