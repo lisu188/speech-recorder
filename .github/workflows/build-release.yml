@@ -29,6 +29,8 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '15859902'
 
       - name: Install Android 17 SDK
         run: sdkmanager "platforms;android-37" "build-tools;36.0.0" --channel=3
