@@ -64,6 +64,7 @@ jobs:
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
+          EXPECTED_CERT_SHA256="c311a44e405ccfab2b822d5295c45e4dbbc6972516c3695dadb146b6149ec2b6"
           printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > release.p12
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" sign \
             --ks release.p12 \
@@ -73,7 +74,15 @@ jobs:
             --key-pass env:RELEASE_KEY_PASSWORD \
             --out SpeechRecorder-release.apk \
             SpeechRecorder-release-unsigned.apk
-          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs SpeechRecorder-release.apk
+          VERIFY_OUTPUT=$("$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs SpeechRecorder-release.apk)
+          printf '%s\n' "$VERIFY_OUTPUT"
+          ACTUAL_CERT_SHA256=$(printf '%s\n' "$VERIFY_OUTPUT" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1 | tr '[:upper:]' '[:lower:]')
+          if [ "$ACTUAL_CERT_SHA256" != "$EXPECTED_CERT_SHA256" ]; then
+            echo "Unexpected release certificate: $ACTUAL_CERT_SHA256" >&2
+            echo "Expected release certificate:  $EXPECTED_CERT_SHA256" >&2
+            rm -f release.p12 SpeechRecorder-release.apk
+            exit 1
+          fi
           rm -f release.p12
 
       - uses: actions/upload-artifact@v4
