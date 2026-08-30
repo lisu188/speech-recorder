@@ -28,6 +28,7 @@ Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VA
 - długie WAV-y dzielone na 8-minutowe fragmenty tylko na potrzeby STT; oryginalne nagranie pozostaje jednym plikiem
 - WorkManager 2.11.2 z wymaganiem aktywnego połączenia sieciowego i retry z backoffem
 - klucz OpenAI szyfrowany kluczem przechowywanym w Android Keystore
+- pliki TXT zapisywane przez Storage Access Framework po jednorazowym wskazaniu `Music/SpeechRecorder`
 - wyszukiwanie po nazwie, podsumowaniu i pełnej transkrypcji
 
 ## Pliki
@@ -41,11 +42,22 @@ Po poprawnej transkrypcji aplikacja tworzy parę o wspólnej nazwie bazowej:
 2026-08-30_20-43_Umówienie_dentysty_na_jutro.txt
 ```
 
-Plik TXT zawiera tytuł, datę, czas nagrania, krótkie podsumowanie i pełną transkrypcję. Finalizacja jest wykonywana w kolejności pozwalającej wycofać zmianę nazwy WAV, jeśli nie uda się utworzyć odpowiadającego mu TXT.
+Plik TXT zawiera tytuł, datę, czas nagrania, krótkie podsumowanie i pełną transkrypcję. Finalizacja najpierw zapisuje tymczasowy TXT, następnie zmienia nazwę WAV i na końcu nadaje finalną nazwę TXT. Jeśli finalizacja się nie powiedzie, aplikacja próbuje przywrócić pierwotną nazwę WAV i usuwa niedokończony TXT.
+
+## Pierwsza konfiguracja transkrypcji
+
+1. Nagraj co najmniej jeden klip, aby katalog `Music/SpeechRecorder` istniał.
+2. Otwórz `Ustawienia` i zapisz własny klucz OpenAI API.
+3. Wybierz `Music/SpeechRecorder` w systemowym selektorze folderu. Aplikacja akceptuje dokładnie ten katalog i utrwala uprawnienie odczytu/zapisu.
+4. Włącz automatyczną transkrypcję.
+
+Automatyczna kolejka działa tylko wtedy, gdy jednocześnie istnieją: zapisany klucz API, utrwalony dostęp do folderu i włączona opcja transkrypcji. Brak sieci nie wpływa na samo nagrywanie; WorkManager czeka na połączenie.
 
 ## OpenAI
 
-Transkrypcja jest domyślnie włączona logicznie, ale żadne audio nie jest wysyłane, dopóki użytkownik nie zapisze własnego klucza OpenAI API w ekranie Ustawienia. Po zapisaniu klucza można również zakolejkować istniejące nagrania bez pliku TXT.
+`gpt-transcribe` wykonuje speech-to-text. Następnie `gpt-5.6-luna` z `reasoning.effort=none` i Structured Outputs generuje krótki tytuł do nazwy pliku oraz zwięzłe podsumowanie. Tytuł jest dodatkowo lokalnie czyszczony z niedozwolonych znaków i ograniczony do 60 znaków.
+
+Żadne audio nie jest wysyłane, dopóki użytkownik nie skonfiguruje własnego klucza API i dostępu do folderu. Po konfiguracji można również zakolejkować istniejące nagrania bez odpowiadającego pliku TXT.
 
 Bezpośrednie używanie osobistego klucza API w aplikacji mobilnej jest przeznaczone dla prywatnych buildów. Dla aplikacji dystrybuowanej innym użytkownikom należy zastąpić bezpośrednie wywołania OpenAI własnym backendem i nie przekazywać długoterminowego klucza API do klienta.
 
