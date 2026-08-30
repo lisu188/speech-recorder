@@ -35,7 +35,7 @@ jobs:
           packages: platform-tools
 
       - name: Install Android 17 SDK
-        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0" --channel=3
+        run: android sdk install platforms/android-37.0 build-tools/37.0.0
 
       - name: Build release APK
         run: gradle --no-daemon :app:assembleRelease
