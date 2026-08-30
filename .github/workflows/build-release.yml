@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feature/**
+      - build/**
   pull_request:
     branches:
       - main
@@ -37,14 +38,35 @@ jobs:
       - name: Install Android 17 SDK
         run: android sdk install platforms/android-37.0 build-tools/37.0.0
 
+      - name: Prepare release signing
+        env:
+          SIGNING_STORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          if [ -n "${SIGNING_STORE_B64:-}" ]; then
+            printf '%s' "$SIGNING_STORE_B64" | base64 --decode > "$RUNNER_TEMP/speech-recorder-release.jks"
+            echo "RELEASE_STORE_FILE=$RUNNER_TEMP/speech-recorder-release.jks" >> "$GITHUB_ENV"
+            echo "RELEASE_KEYSTORE_PASSWORD=$SIGNING_STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "RELEASE_KEY_ALIAS=$SIGNING_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "RELEASE_KEY_PASSWORD=$SIGNING_KEY_PASSWORD" >> "$GITHUB_ENV"
+          fi
+
       - name: Build release APK
         run: gradle --no-daemon :app:assembleRelease
 
       - name: Prepare artifact
-        run: cp app/build/outputs/apk/release/app-release-unsigned.apk SpeechRecorder-release-unsigned.apk
+        run: |
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk SpeechRecorder-1.4.0-release.apk
+            apksigner verify --verbose --print-certs SpeechRecorder-1.4.0-release.apk
+          else
+            cp app/build/outputs/apk/release/app-release-unsigned.apk SpeechRecorder-1.4.0-release-unsigned.apk
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SpeechRecorder-Release-Unsigned
-          path: SpeechRecorder-release-unsigned.apk
+          name: SpeechRecorder-1.4.0-Release
+          path: SpeechRecorder-1.4.0-release*.apk
           if-no-files-found: error

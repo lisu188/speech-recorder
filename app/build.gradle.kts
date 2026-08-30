@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
 }
 
+val releaseStoreFile = System.getenv("RELEASE_STORE_FILE")
+
 android {
     namespace = "pl.lisu188.speechrecorder"
     compileSdk = 37
@@ -12,6 +14,25 @@ android {
         targetSdk = 37
         versionCode = 6
         versionName = "1.4.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (!releaseStoreFile.isNullOrBlank()) {
+                storeFile = file(releaseStoreFile)
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            if (!releaseStoreFile.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     compileOptions {
