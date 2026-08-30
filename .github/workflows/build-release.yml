@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feature/**
+      - build/**
   pull_request:
     branches:
       - main
@@ -41,10 +42,10 @@ jobs:
         run: gradle --no-daemon :app:assembleRelease
 
       - name: Prepare artifact
-        run: cp app/build/outputs/apk/release/app-release-unsigned.apk SpeechRecorder-release-unsigned.apk
+        run: cp app/build/outputs/apk/release/app-release.apk SpeechRecorder-1.4.0-release-installable.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SpeechRecorder-Release-Unsigned
-          path: SpeechRecorder-release-unsigned.apk
+          name: SpeechRecorder-1.4.0-Installable-Release
+          path: SpeechRecorder-1.4.0-release-installable.apk
           if-no-files-found: error
