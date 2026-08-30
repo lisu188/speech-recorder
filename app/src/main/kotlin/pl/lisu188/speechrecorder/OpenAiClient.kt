@@ -60,6 +60,7 @@ class OpenAiClient {
         val body = JSONObject()
             .put("model", METADATA_MODEL)
             .put("store", false)
+            .put("reasoning", JSONObject().put("effort", "none"))
             .put("max_output_tokens", 350)
             .put(
                 "instructions",
