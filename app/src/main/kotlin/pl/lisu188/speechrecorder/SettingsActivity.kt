@@ -20,11 +20,40 @@ class SettingsActivity : Activity() {
     private lateinit var apiKeyInput: EditText
     private lateinit var autoTranscribe: Switch
     private lateinit var keyStatus: TextView
+    private lateinit var folderStatus: TextView
     private lateinit var deleteKeyButton: Button
+    private lateinit var revokeFolderButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::keyStatus.isInitialized) refreshState()
+    }
+
+    @Deprecated("Deprecated in Android API, retained for minSdk-compatible folder selection")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_TRANSCRIPT_FOLDER || resultCode != RESULT_OK) return
+
+        val uri = data?.data ?: return
+        if (!TranscriptFolderAccess.save(this, uri, data.flags)) {
+            Toast.makeText(
+                this,
+                "Wybierz dokładnie Pamięć wewnętrzna/Music/SpeechRecorder",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+
+        refreshState()
+        if (TranscriptionScheduler.canTranscribe(this)) {
+            TranscriptionScheduler.enqueueMissing(this)
+        }
+        Toast.makeText(this, "Folder transkrypcji zapisany", Toast.LENGTH_SHORT).show()
     }
 
     private fun buildUi(): LinearLayout {
@@ -77,6 +106,30 @@ class SettingsActivity : Activity() {
         }
         content.addView(apiKeyInput, matchWrap())
 
+        folderStatus = textView("", 14, Color.LTGRAY).apply {
+            setPadding(0, dp(12), 0, dp(4))
+        }
+        content.addView(folderStatus, matchWrap())
+
+        content.addView(
+            Button(this).apply {
+                text = "WYBIERZ FOLDER MUSIC/SPEECHRECORDER"
+                setOnClickListener { requestTranscriptFolder() }
+            },
+            matchWrap().apply { topMargin = dp(4) },
+        )
+
+        revokeFolderButton = Button(this).apply {
+            text = "USUŃ DOSTĘP DO FOLDERU"
+            setOnClickListener {
+                TranscriptFolderAccess.clear(this@SettingsActivity)
+                TranscriptionScheduler.cancelPending(this@SettingsActivity)
+                refreshState()
+                Toast.makeText(this@SettingsActivity, "Dostęp do folderu usunięty", Toast.LENGTH_SHORT).show()
+            }
+        }
+        content.addView(revokeFolderButton, matchWrap().apply { topMargin = dp(6) })
+
         autoTranscribe = Switch(this).apply {
             text = "Automatycznie transkrybuj nowe nagrania"
             setTextColor(Color.WHITE)
@@ -95,14 +148,7 @@ class SettingsActivity : Activity() {
         content.addView(
             Button(this).apply {
                 text = "TRANSKRYBUJ BRAKUJĄCE NAGRANIA"
-                setOnClickListener {
-                    if (!OpenAiKeyStore.hasKey(this@SettingsActivity)) {
-                        Toast.makeText(this@SettingsActivity, "Najpierw zapisz klucz OpenAI API", Toast.LENGTH_LONG).show()
-                    } else {
-                        TranscriptionScheduler.enqueueMissing(this@SettingsActivity)
-                        Toast.makeText(this@SettingsActivity, "Dodano brakujące transkrypcje do kolejki", Toast.LENGTH_SHORT).show()
-                    }
-                }
+                setOnClickListener { enqueueMissing() }
             },
             matchWrap().apply { topMargin = dp(8) },
         )
@@ -112,7 +158,7 @@ class SettingsActivity : Activity() {
             setOnClickListener {
                 OpenAiKeyStore.delete(this@SettingsActivity)
                 TranscriptionScheduler.cancelPending(this@SettingsActivity)
-                refreshKeyState()
+                refreshState()
                 Toast.makeText(this@SettingsActivity, "Klucz OpenAI usunięty", Toast.LENGTH_SHORT).show()
             }
         }
@@ -121,12 +167,12 @@ class SettingsActivity : Activity() {
         addSection(
             content,
             "Pliki po transkrypcji",
-            "Po zakończeniu transkrypcji aplikacja nadaje WAV krótką nazwę opisującą rozmowę i zapisuje obok plik TXT o identycznej nazwie bazowej. TXT zawiera podsumowanie oraz pełną transkrypcję.",
+            "Po zakończeniu transkrypcji aplikacja nadaje WAV krótką nazwę opisującą rozmowę i zapisuje obok plik TXT o identycznej nazwie bazowej. TXT zawiera podsumowanie oraz pełną transkrypcję. Android wymaga jednorazowego wskazania folderu Music/SpeechRecorder, aby aplikacja mogła zapisywać w nim pliki tekstowe.",
         )
         addSection(
             content,
             "Prywatność",
-            "Nagrywanie i wykrywanie mowy działają lokalnie. Gdy automatyczna transkrypcja jest włączona i zapisano klucz API, zakończone fragmenty audio są wysyłane do OpenAI. Klucz API jest szyfrowany przy użyciu Android Keystore i nie jest zapisany w repozytorium.",
+            "Nagrywanie i wykrywanie mowy działają lokalnie. Audio jest wysyłane do OpenAI dopiero po zakończeniu klipu, gdy automatyczna transkrypcja jest włączona, zapisano klucz API i przyznano dostęp do folderu. Klucz API jest szyfrowany przy użyciu Android Keystore i nie jest zapisany w repozytorium.",
         )
 
         content.addView(
@@ -153,9 +199,20 @@ class SettingsActivity : Activity() {
             matchWrap().apply { topMargin = dp(10) },
         )
 
-        refreshKeyState()
+        refreshState()
         page.addView(AppNavigation.create(this, AppNavigation.SETTINGS), matchWrap())
         return page
+    }
+
+    private fun requestTranscriptFolder() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+        }
+        @Suppress("DEPRECATION")
+        startActivityForResult(intent, REQUEST_TRANSCRIPT_FOLDER)
     }
 
     private fun saveTranscriptionSettings() {
@@ -175,17 +232,43 @@ class SettingsActivity : Activity() {
         }
 
         TranscriptionSettings.setAutoTranscribe(this, autoTranscribe.isChecked)
-        if (autoTranscribe.isChecked && OpenAiKeyStore.hasKey(this)) {
-            TranscriptionScheduler.enqueueMissing(this)
-        } else if (!autoTranscribe.isChecked) {
-            TranscriptionScheduler.cancelPending(this)
+        when {
+            !autoTranscribe.isChecked -> TranscriptionScheduler.cancelPending(this)
+            TranscriptionScheduler.canTranscribe(this) -> TranscriptionScheduler.enqueueMissing(this)
         }
-        refreshKeyState()
-        Toast.makeText(this, "Ustawienia zapisane", Toast.LENGTH_SHORT).show()
+        refreshState()
+
+        if (autoTranscribe.isChecked && !OpenAiKeyStore.hasKey(this)) {
+            Toast.makeText(this, "Ustawienia zapisane. Dodaj klucz OpenAI, aby uruchomić transkrypcję.", Toast.LENGTH_LONG).show()
+        } else if (autoTranscribe.isChecked && !TranscriptFolderAccess.hasAccess(this)) {
+            Toast.makeText(this, "Ustawienia zapisane. Wybierz folder Music/SpeechRecorder.", Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(this, "Ustawienia zapisane", Toast.LENGTH_SHORT).show()
+        }
     }
 
-    private fun refreshKeyState() {
+    private fun enqueueMissing() {
+        when {
+            !OpenAiKeyStore.hasKey(this) ->
+                Toast.makeText(this, "Najpierw zapisz klucz OpenAI API", Toast.LENGTH_LONG).show()
+
+            !TranscriptFolderAccess.hasAccess(this) ->
+                Toast.makeText(this, "Najpierw wybierz folder Music/SpeechRecorder", Toast.LENGTH_LONG).show()
+
+            !TranscriptionSettings.autoTranscribe(this) ->
+                Toast.makeText(this, "Najpierw włącz automatyczną transkrypcję", Toast.LENGTH_LONG).show()
+
+            else -> {
+                TranscriptionScheduler.enqueueMissing(this)
+                Toast.makeText(this, "Dodano brakujące transkrypcje do kolejki", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun refreshState() {
         val hasKey = OpenAiKeyStore.hasKey(this)
+        val hasFolder = TranscriptFolderAccess.hasAccess(this)
+
         keyStatus.text = if (hasKey) {
             "Klucz OpenAI jest zapisany bezpiecznie na tym urządzeniu."
         } else {
@@ -197,6 +280,13 @@ class SettingsActivity : Activity() {
             "Klucz OpenAI API (sk-...)"
         }
         deleteKeyButton.isEnabled = hasKey
+
+        folderStatus.text = if (hasFolder) {
+            "Folder transkrypcji: ${TranscriptFolderAccess.displayPath(this)}"
+        } else {
+            "Folder transkrypcji: nie wybrano"
+        }
+        revokeFolderButton.isEnabled = hasFolder
     }
 
     private fun addSection(parent: LinearLayout, heading: String, body: String) {
@@ -226,4 +316,8 @@ class SettingsActivity : Activity() {
     )
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    private companion object {
+        const val REQUEST_TRANSCRIPT_FOLDER = 7301
+    }
 }
