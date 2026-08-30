@@ -1,10 +1,11 @@
 package pl.lisu188.speechrecorder
 
-import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -46,7 +47,7 @@ class TranscriptStore(private val context: Context) {
         val baseName = uniqueBaseName("${basePrefix}_$cleanTitle")
         val audioName = "$baseName.wav"
         val transcriptName = "$baseName.txt"
-        val transcriptUri = createPendingTranscript()
+        val pendingTranscriptUri = createPendingTranscript()
         var audioRenamed = false
 
         try {
@@ -57,7 +58,7 @@ class TranscriptStore(private val context: Context) {
                 summary = summary,
                 transcript = transcript,
             )
-            resolver.openOutputStream(transcriptUri, "w")?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
+            resolver.openOutputStream(pendingTranscriptUri, "w")?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
                 writer.write(content)
             } ?: throw IOException("Unable to write transcript")
 
@@ -70,16 +71,11 @@ class TranscriptStore(private val context: Context) {
             if (renamed <= 0) throw IOException("Unable to rename audio recording")
             audioRenamed = true
 
-            val transcriptFinalized = resolver.update(
-                transcriptUri,
-                ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, transcriptName)
-                    put(MediaStore.MediaColumns.IS_PENDING, 0)
-                },
-                null,
-                null,
-            )
-            if (transcriptFinalized <= 0) throw IOException("Unable to finalize transcript")
+            val transcriptUri = DocumentsContract.renameDocument(
+                resolver,
+                pendingTranscriptUri,
+                transcriptName,
+            ) ?: throw IOException("Unable to finalize transcript")
 
             return FinalizedPair(audioName, transcriptName, transcriptUri)
         } catch (error: Exception) {
@@ -87,9 +83,7 @@ class TranscriptStore(private val context: Context) {
                 try {
                     resolver.update(
                         audioUri,
-                        ContentValues().apply {
-                            put(MediaStore.MediaColumns.DISPLAY_NAME, info.displayName)
-                        },
+                        ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, info.displayName) },
                         null,
                         null,
                     )
@@ -97,7 +91,7 @@ class TranscriptStore(private val context: Context) {
                 }
             }
             try {
-                resolver.delete(transcriptUri, null, null)
+                DocumentsContract.deleteDocument(resolver, pendingTranscriptUri)
             } catch (_: Exception) {
             }
             throw error
@@ -105,26 +99,15 @@ class TranscriptStore(private val context: Context) {
     }
 
     fun loadDocuments(): Map<String, TranscriptDocument> {
-        val collection = MediaStore.Files.getContentUri("external")
+        val treeUri = TranscriptFolderAccess.load(context) ?: return emptyMap()
         val result = linkedMapOf<String, TranscriptDocument>()
-        val projection = arrayOf(
-            MediaStore.Files.FileColumns._ID,
-            MediaStore.MediaColumns.DISPLAY_NAME,
-        )
-
-        resolver.query(
-            collection,
-            projection,
-            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? AND ${MediaStore.MediaColumns.IS_PENDING}=0",
-            arrayOf(RELATIVE_PATH_QUERY, "%.txt"),
-            null,
-        )?.use { cursor ->
-            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
-            val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+        queryChildren(treeUri)?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
             while (cursor.moveToNext()) {
                 val name = cursor.getString(nameColumn)
                 if (!name.endsWith(".txt", ignoreCase = true) || name.startsWith("pending_")) continue
-                val uri = ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
+                val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, cursor.getString(idColumn))
                 val text = readText(uri)
                 result[name.dropLast(4)] = TranscriptDocument(
                     uri = uri,
@@ -138,39 +121,72 @@ class TranscriptStore(private val context: Context) {
     }
 
     fun deleteTranscript(uri: Uri) {
-        resolver.delete(uri, null, null)
+        DocumentsContract.deleteDocument(resolver, uri)
     }
 
     private fun createPendingTranscript(): Uri {
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, "pending_${UUID.randomUUID()}.txt")
-            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, RELATIVE_PATH)
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        return resolver.insert(MediaStore.Files.getContentUri("external"), values)
-            ?: throw IOException("Unable to create transcript file")
+        val treeUri = TranscriptFolderAccess.load(context)
+            ?: throw IOException("Transcript folder access is not configured")
+        val parentUri = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+        )
+        return DocumentsContract.createDocument(
+            resolver,
+            parentUri,
+            "text/plain",
+            "pending_${UUID.randomUUID()}.txt",
+        ) ?: throw IOException("Unable to create transcript file")
     }
 
     private fun uniqueBaseName(initial: String): String {
         var candidate = initial
         var suffix = 2
-        while (displayNameExists("$candidate.wav") || displayNameExists("$candidate.txt")) {
+        while (audioNameExists("$candidate.wav") || transcriptNameExists("$candidate.txt")) {
             candidate = "${initial}_$suffix"
             suffix++
         }
         return candidate
     }
 
-    private fun displayNameExists(name: String): Boolean {
+    private fun audioNameExists(name: String): Boolean {
         resolver.query(
-            MediaStore.Files.getContentUri("external"),
-            arrayOf(MediaStore.Files.FileColumns._ID),
-            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Audio.Media._ID),
+            "${MediaStore.Audio.Media.RELATIVE_PATH}=? AND ${MediaStore.Audio.Media.DISPLAY_NAME}=?",
             arrayOf(RELATIVE_PATH_QUERY, name),
             null,
         )?.use { cursor -> return cursor.moveToFirst() }
         return false
+    }
+
+    private fun transcriptNameExists(name: String): Boolean {
+        val treeUri = TranscriptFolderAccess.load(context) ?: return false
+        queryChildren(treeUri)?.use { cursor ->
+            val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameColumn).equals(name, ignoreCase = true)) return true
+            }
+        }
+        return false
+    }
+
+    private fun queryChildren(treeUri: Uri): Cursor? {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+        )
+        return resolver.query(
+            childrenUri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            ),
+            null,
+            null,
+            null,
+        )
     }
 
     private fun readText(uri: Uri): String = try {
@@ -194,9 +210,7 @@ class TranscriptStore(private val context: Context) {
     private fun sanitizeTitle(rawTitle: String): String {
         val invalid = setOf('\\', '/', ':', '*', '?', '"', '<', '>', '|')
         val normalized = rawTitle
-            .map { character ->
-                if (character.code < 32 || character in invalid) ' ' else character
-            }
+            .map { character -> if (character.code < 32 || character in invalid) ' ' else character }
             .joinToString("")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -204,7 +218,8 @@ class TranscriptStore(private val context: Context) {
             .take(MAX_TITLE_LENGTH)
             .trim()
 
-        return (normalized.ifBlank { "Nagranie" })
+        return normalized
+            .ifBlank { "Nagranie" }
             .replace(Regex("\\s+"), "_")
             .trim('_')
             .ifBlank { "Nagranie" }
