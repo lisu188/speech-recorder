@@ -27,3 +27,14 @@ Lokalny dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Po uruc
 - osobny ekran ustawień systemowych i optymalizacji baterii
 
 Android może nadal zatrzymać aplikację po Force stop, odebraniu uprawnienia mikrofonu albo w wyniku ograniczeń systemowych. Android 14+ nie pozwala uruchomić mikrofonowego foreground service bezpośrednio z `BOOT_COMPLETED`, dlatego po restarcie wymagane jest świadome tapnięcie powiadomienia przez użytkownika.
+
+## Release signing
+
+CI zawsze buduje `SpeechRecorder-Release-Unsigned`. Na pushu do `main` może dodatkowo utworzyć i zweryfikować `SpeechRecorder-Release-Signed`, jeśli w GitHub Actions są skonfigurowane cztery sekrety:
+
+- `RELEASE_KEYSTORE_BASE64` — keystore PKCS12 zakodowany Base64 bez znaków nowej linii
+- `RELEASE_KEYSTORE_PASSWORD`
+- `RELEASE_KEY_ALIAS`
+- `RELEASE_KEY_PASSWORD`
+
+Klucza release nie wolno dodawać do repozytorium. Po opublikowaniu pierwszego APK trzeba zachować dokładnie ten sam klucz dla wszystkich kolejnych aktualizacji tego `applicationId`; APK podpisane innym kluczem nie zainstaluje się jako aktualizacja istniejącej aplikacji.
