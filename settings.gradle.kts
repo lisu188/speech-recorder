@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = 'SpeechRecorder'
-include ':app'
+rootProject.name = "SpeechRecorder"
+include(":app")
