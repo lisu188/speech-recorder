@@ -19,7 +19,7 @@ object TranscriptionScheduler {
     private const val TAG = "speech-recorder-transcription"
 
     fun enqueue(context: Context, audioUri: Uri): Boolean {
-        if (!TranscriptionSettings.autoTranscribe(context) || !OpenAiKeyStore.hasKey(context)) return false
+        if (!canTranscribe(context)) return false
 
         val work = OneTimeWorkRequestBuilder<TranscriptionWorker>()
             .setInputData(Data.Builder().putString(TranscriptionWorker.INPUT_AUDIO_URI, audioUri.toString()).build())
@@ -41,7 +41,7 @@ object TranscriptionScheduler {
     }
 
     fun enqueueMissing(context: Context) {
-        if (!TranscriptionSettings.autoTranscribe(context) || !OpenAiKeyStore.hasKey(context)) return
+        if (!canTranscribe(context)) return
 
         val transcriptNames = TranscriptStore(context).loadDocuments().keys
         val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
@@ -72,6 +72,11 @@ object TranscriptionScheduler {
     fun cancelPending(context: Context) {
         WorkManager.getInstance(context).cancelAllWorkByTag(TAG)
     }
+
+    fun canTranscribe(context: Context): Boolean =
+        TranscriptionSettings.autoTranscribe(context) &&
+            OpenAiKeyStore.hasKey(context) &&
+            TranscriptFolderAccess.hasAccess(context)
 
     private fun uniqueWorkName(uri: Uri): String {
         val id = UUID.nameUUIDFromBytes(uri.toString().toByteArray(StandardCharsets.UTF_8))
