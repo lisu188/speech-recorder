@@ -374,6 +374,7 @@ class RecorderService : Service() {
                 null,
             )
             wavFile.delete()
+            uri?.let { TranscriptionScheduler.enqueue(this, it) }
         } catch (_: Exception) {
             uri?.let { resolver.delete(it, null, null) }
             fallbackSave(wavFile, fileName)
