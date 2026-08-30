@@ -1,0 +1,10 @@
+# Android release signing material must never be committed
+*.jks
+*.keystore
+keystore.properties
+
+# Local Android/Gradle state
+local.properties
+.gradle/
+build/
+app/build/
