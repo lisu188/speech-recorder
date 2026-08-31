@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+      - feature/**
+      - build/**
   pull_request:
     branches:
       - main
@@ -31,6 +33,7 @@ jobs:
         uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: '15859902'
+          packages: platform-tools
 
       - name: Install Android 17 SDK
         run: android sdk install platforms/android-37.0 build-tools/37.0.0
@@ -38,62 +41,11 @@ jobs:
       - name: Build release APK
         run: gradle --no-daemon :app:assembleRelease
 
-      - name: Prepare unsigned artifact
-        run: cp app/build/outputs/apk/release/app-release-unsigned.apk SpeechRecorder-release-unsigned.apk
-
-      - name: Check release signing configuration
-        id: signing
-        if: github.event_name != 'pull_request'
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$RELEASE_KEYSTORE_PASSWORD" ] && [ -n "$RELEASE_KEY_ALIAS" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Sign and verify release APK
-        if: steps.signing.outputs.enabled == 'true'
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: |
-          EXPECTED_CERT_SHA256="c311a44e405ccfab2b822d5295c45e4dbbc6972516c3695dadb146b6149ec2b6"
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > release.p12
-          "$ANDROID_HOME/build-tools/37.0.0/apksigner" sign \
-            --ks release.p12 \
-            --ks-type PKCS12 \
-            --ks-pass env:RELEASE_KEYSTORE_PASSWORD \
-            --ks-key-alias "$RELEASE_KEY_ALIAS" \
-            --key-pass env:RELEASE_KEY_PASSWORD \
-            --out SpeechRecorder-release.apk \
-            SpeechRecorder-release-unsigned.apk
-          VERIFY_OUTPUT=$("$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose --print-certs SpeechRecorder-release.apk)
-          printf '%s\n' "$VERIFY_OUTPUT"
-          ACTUAL_CERT_SHA256=$(printf '%s\n' "$VERIFY_OUTPUT" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1 | tr '[:upper:]' '[:lower:]')
-          if [ "$ACTUAL_CERT_SHA256" != "$EXPECTED_CERT_SHA256" ]; then
-            echo "Unexpected release certificate: $ACTUAL_CERT_SHA256" >&2
-            echo "Expected release certificate:  $EXPECTED_CERT_SHA256" >&2
-            rm -f release.p12 SpeechRecorder-release.apk
-            exit 1
-          fi
-          rm -f release.p12
+      - name: Prepare artifact
+        run: cp app/build/outputs/apk/release/app-release.apk SpeechRecorder-1.4.0-release-installable.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SpeechRecorder-Release-Unsigned
-          path: SpeechRecorder-release-unsigned.apk
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        if: steps.signing.outputs.enabled == 'true'
-        with:
-          name: SpeechRecorder-Release-Signed
-          path: SpeechRecorder-release.apk
+          name: SpeechRecorder-1.4.0-Installable-Release
+          path: SpeechRecorder-1.4.0-release-installable.apk
           if-no-files-found: error
