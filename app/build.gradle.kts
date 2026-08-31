@@ -10,8 +10,8 @@ android {
         applicationId = "pl.lisu188.speechrecorder"
         minSdk = 29
         targetSdk = 37
-        versionCode = 5
-        versionName = "1.3.0"
+        versionCode = 6
+        versionName = "1.4.0"
     }
 
     compileOptions {
@@ -22,4 +22,8 @@ android {
     sourceSets.named("main") {
         kotlin.directories += "src/main/kotlin"
     }
+}
+
+dependencies {
+    implementation("androidx.work:work-runtime:2.11.2")
 }

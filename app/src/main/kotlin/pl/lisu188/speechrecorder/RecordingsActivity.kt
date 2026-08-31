@@ -4,7 +4,6 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ContentUris
 import android.content.Intent
-import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.graphics.Color
 import android.graphics.Typeface
@@ -45,6 +44,7 @@ class RecordingsActivity : Activity() {
     private lateinit var nowPlaying: TextView
     private lateinit var search: EditText
     private lateinit var sort: Spinner
+    private var transcriptDocuments: Map<String, TranscriptStore.TranscriptDocument> = emptyMap()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,7 +80,7 @@ class RecordingsActivity : Activity() {
         content.addView(summary, matchWrap())
 
         search = EditText(this).apply {
-            hint = "Szukaj nagrania"
+            hint = "Szukaj w nazwach i transkrypcjach"
             isSingleLine = true
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
@@ -129,6 +129,12 @@ class RecordingsActivity : Activity() {
 
     private fun loadRecordings() {
         recordings.clear()
+        transcriptDocuments = try {
+            TranscriptStore(this).loadDocuments()
+        } catch (_: Exception) {
+            emptyMap()
+        }
+
         val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
@@ -143,7 +149,7 @@ class RecordingsActivity : Activity() {
                 collection,
                 projection,
                 "${MediaStore.Audio.Media.RELATIVE_PATH}=?",
-                arrayOf("Music/SpeechRecorder/"),
+                arrayOf(TranscriptStore.RELATIVE_PATH_QUERY),
                 null,
             )?.use { cursor -> readRecordings(cursor, collection) }
         } catch (_: Exception) {
@@ -161,14 +167,19 @@ class RecordingsActivity : Activity() {
 
         while (cursor.moveToNext()) {
             val uri = ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
+            val name = cursor.getString(nameColumn)
             val duration = cursor.getLong(durationColumn).takeIf { it > 0L } ?: readDuration(uri)
+            val transcript = transcriptDocuments[name.substringBeforeLast('.')]
             recordings += Recording(
                 uri = uri,
-                name = cursor.getString(nameColumn),
+                name = name,
                 dateAdded = cursor.getLong(dateColumn) * 1000L,
                 sizeBytes = cursor.getLong(sizeColumn),
                 durationMs = duration,
                 waveform = buildWaveform(uri),
+                transcriptUri = transcript?.uri,
+                transcriptText = transcript?.text.orEmpty(),
+                transcriptSummary = transcript?.summary.orEmpty(),
             )
         }
     }
@@ -180,6 +191,9 @@ class RecordingsActivity : Activity() {
         visible += recordings.filter { recording ->
             query.isEmpty() ||
                 recording.name.lowercase(Locale.getDefault()).contains(query) ||
+                displayTitle(recording).lowercase(Locale.getDefault()).contains(query) ||
+                recording.transcriptSummary.lowercase(Locale.getDefault()).contains(query) ||
+                recording.transcriptText.lowercase(Locale.getDefault()).contains(query) ||
                 formatDate(recording.dateAdded).lowercase(Locale.getDefault()).contains(query)
         }
 
@@ -191,7 +205,8 @@ class RecordingsActivity : Activity() {
         }
 
         val totalBytes = visible.sumOf { it.sizeBytes }
-        summary.text = "${visible.size}${if (visible.size == 1) " nagranie" else " nagrań"}  •  ${formatSize(totalBytes)}"
+        val transcripts = visible.count { it.transcriptUri != null }
+        summary.text = "${visible.size}${if (visible.size == 1) " nagranie" else " nagrań"}  •  $transcripts tekstów  •  ${formatSize(totalBytes)}"
         adapter.notifyDataSetChanged()
     }
 
@@ -258,12 +273,24 @@ class RecordingsActivity : Activity() {
                 start()
             }
             playingUri = recording.uri
-            nowPlaying.text = "Odtwarzanie: ${formatDate(recording.dateAdded)}"
+            nowPlaying.text = "Odtwarzanie: ${displayTitle(recording)}"
             adapter.notifyDataSetChanged()
         } catch (_: Exception) {
             stopPlayback()
             Toast.makeText(this, "Nie udało się odtworzyć nagrania", Toast.LENGTH_LONG).show()
         }
+    }
+
+    private fun showTranscript(recording: Recording) {
+        if (recording.transcriptText.isBlank()) {
+            Toast.makeText(this, "Transkrypcja nie jest jeszcze dostępna", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(displayTitle(recording))
+            .setMessage(recording.transcriptText)
+            .setPositiveButton("Zamknij", null)
+            .show()
     }
 
     private fun shareRecording(recording: Recording) {
@@ -282,7 +309,13 @@ class RecordingsActivity : Activity() {
     private fun confirmDelete(recording: Recording) {
         AlertDialog.Builder(this)
             .setTitle("Usunąć nagranie?")
-            .setMessage(formatDate(recording.dateAdded))
+            .setMessage(
+                if (recording.transcriptUri != null) {
+                    "${displayTitle(recording)}\n\nUsunięty zostanie również powiązany plik transkrypcji."
+                } else {
+                    displayTitle(recording)
+                },
+            )
             .setNegativeButton("Anuluj", null)
             .setPositiveButton("Usuń") { _, _ -> deleteRecording(recording) }
             .show()
@@ -292,6 +325,12 @@ class RecordingsActivity : Activity() {
         if (playingUri == recording.uri) stopPlayback()
         try {
             if (contentResolver.delete(recording.uri, null, null) > 0) {
+                recording.transcriptUri?.let { transcriptUri ->
+                    try {
+                        TranscriptStore(this).deleteTranscript(transcriptUri)
+                    } catch (_: Exception) {
+                    }
+                }
                 Toast.makeText(this, "Nagranie usunięte", Toast.LENGTH_SHORT).show()
                 loadRecordings()
             } else {
@@ -315,6 +354,18 @@ class RecordingsActivity : Activity() {
         if (::nowPlaying.isInitialized) nowPlaying.text = "Nic nie jest odtwarzane"
     }
 
+    private fun displayTitle(recording: Recording): String {
+        val baseName = recording.name.substringBeforeLast('.')
+        val semanticTitle = Regex("^\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}_(.+)$")
+            .find(baseName)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.replace('_', ' ')
+            ?.trim()
+        return semanticTitle?.takeIf { it.isNotBlank() }
+            ?: baseName.replace('_', ' ')
+    }
+
     private fun formatDate(millis: Long) = DateFormat.getDateTimeInstance(
         DateFormat.MEDIUM,
         DateFormat.SHORT,
@@ -322,7 +373,17 @@ class RecordingsActivity : Activity() {
 
     private fun formatDuration(ms: Long): String {
         val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
-        return String.format(Locale.getDefault(), "%d:%02d", totalSeconds / 60L, totalSeconds % 60L)
+        return if (totalSeconds >= 3600L) {
+            String.format(
+                Locale.getDefault(),
+                "%d:%02d:%02d",
+                totalSeconds / 3600L,
+                (totalSeconds % 3600L) / 60L,
+                totalSeconds % 60L,
+            )
+        } else {
+            String.format(Locale.getDefault(), "%d:%02d", totalSeconds / 60L, totalSeconds % 60L)
+        }
     }
 
     private fun formatSize(bytes: Long) = if (bytes < 1024L * 1024L) {
@@ -374,10 +435,10 @@ class RecordingsActivity : Activity() {
                             LinearLayout(this@RecordingsActivity).apply {
                                 orientation = LinearLayout.VERTICAL
                                 setPadding(dp(10), 0, 0, 0)
-                                addView(textView(formatDate(recording.dateAdded), 16, Color.WHITE, true), matchWrap())
+                                addView(textView(displayTitle(recording), 16, Color.WHITE, true), matchWrap())
                                 addView(
                                     textView(
-                                        "${formatDuration(recording.durationMs)}  •  ${formatSize(recording.sizeBytes)}  •  ${recording.name}",
+                                        "${formatDate(recording.dateAdded)}  •  ${formatDuration(recording.durationMs)}  •  ${formatSize(recording.sizeBytes)}",
                                         12,
                                         Color.LTGRAY,
                                     ).apply { maxLines = 1 },
@@ -387,6 +448,15 @@ class RecordingsActivity : Activity() {
                                     addView(
                                         textView(recording.waveform, 18, Color.rgb(111, 207, 135)).apply {
                                             letterSpacing = 0.02f
+                                        },
+                                        matchWrap(),
+                                    )
+                                }
+                                if (recording.transcriptSummary.isNotBlank()) {
+                                    addView(
+                                        textView(recording.transcriptSummary, 13, Color.LTGRAY).apply {
+                                            maxLines = 2
+                                            setPadding(0, dp(4), 0, 0)
                                         },
                                         matchWrap(),
                                     )
@@ -405,11 +475,22 @@ class RecordingsActivity : Activity() {
                         setPadding(dp(58), dp(6), 0, 0)
                         addView(
                             Button(this@RecordingsActivity).apply {
+                                text = "TEKST"
+                                textSize = 11f
+                                isEnabled = recording.transcriptUri != null
+                                setOnClickListener { showTranscript(recording) }
+                            },
+                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+                        )
+                        addView(
+                            Button(this@RecordingsActivity).apply {
                                 text = "UDOSTĘPNIJ"
                                 textSize = 11f
                                 setOnClickListener { shareRecording(recording) }
                             },
-                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                                leftMargin = dp(6)
+                            },
                         )
                         addView(
                             Button(this@RecordingsActivity).apply {
@@ -435,6 +516,9 @@ class RecordingsActivity : Activity() {
         val sizeBytes: Long,
         val durationMs: Long,
         val waveform: String,
+        val transcriptUri: Uri?,
+        val transcriptText: String,
+        val transcriptSummary: String,
     )
 
     private companion object {
