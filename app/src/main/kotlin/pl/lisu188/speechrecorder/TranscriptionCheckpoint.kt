@@ -33,6 +33,13 @@ class TranscriptionCheckpoint(root: File, recordingId: String) {
         directory.deleteRecursively()
     }
 
+    fun retryAfterFailure(workId: String, maxRetries: Int): Boolean {
+        val stage = "failures_$workId"
+        val failures = remember(stage) { "0" }.toInt()
+        write(stage, (failures + 1).toString())
+        return failures < maxRetries
+    }
+
     private fun stageFile(stage: String): File {
         require(stage.matches(Regex("[a-z0-9_-]+")))
         return File(directory, "$stage.txt")

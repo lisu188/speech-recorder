@@ -193,6 +193,12 @@ class RecorderService : Service() {
         var noiseFloorDb = -55.0
 
         try {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                prefs().edit().putBoolean("enabled", false).apply()
+                running.set(false)
+                stopSelf()
+                return
+            }
             val minBuffer = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,

@@ -19,6 +19,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import java.text.DateFormat
 import java.util.Date
 
@@ -71,12 +72,7 @@ class MainActivity : Activity() {
     private fun registerLevelReceiver() {
         if (receiverRegistered) return
         val filter = IntentFilter(RecorderService.ACTION_LEVEL)
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(levelReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(levelReceiver, filter)
-        }
+        ContextCompat.registerReceiver(this, levelReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         receiverRegistered = true
     }
 

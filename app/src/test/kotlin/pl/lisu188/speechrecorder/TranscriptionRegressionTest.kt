@@ -80,6 +80,15 @@ class TranscriptionRegressionTest {
         assertEquals("second", TranscriptionCheckpoint(root, "audio-2").remember("transcript") { error("Lost other audio") })
     }
 
+    @Test fun retryBudgetSurvivesRestartsAndResetsForManualRetry() {
+        val root = temporary.newFolder()
+        repeat(5) {
+            assertTrue(TranscriptionCheckpoint(root, "audio-1").retryAfterFailure("work-1", 5))
+        }
+        assertFalse(TranscriptionCheckpoint(root, "audio-1").retryAfterFailure("work-1", 5))
+        assertTrue(TranscriptionCheckpoint(root, "audio-1").retryAfterFailure("work-2", 5))
+    }
+
     @Test fun budgetPausePreservesCompletedChunks() {
         val checkpoint = TranscriptionCheckpoint(temporary.newFolder(), "audio-1")
         val chunks = listOf(chunk("one"), chunk("two"))

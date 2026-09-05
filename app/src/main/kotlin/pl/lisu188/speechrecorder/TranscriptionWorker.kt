@@ -14,7 +14,7 @@ class TranscriptionWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : Worker(appContext, params) {
-    private var client: OpenAiClient? = null
+    @Volatile private var client: OpenAiClient? = null
 
     override fun onStopped() {
         client?.cancel()
@@ -70,9 +70,9 @@ class TranscriptionWorker(
         } catch (_: WorkPaused) {
             Result.retry()
         } catch (error: OpenAiClient.OpenAiException) {
-            if (error.retryable) retryOrFail(error.message) else failure(error.message)
+            if (error.retryable) retryOrFail(checkpoint, error.message) else failure(error.message)
         } catch (error: IOException) {
-            retryOrFail(error.message)
+            retryOrFail(checkpoint, error.message)
         } catch (error: SecurityException) {
             failure(error.message)
         } catch (error: Exception) {
@@ -84,8 +84,11 @@ class TranscriptionWorker(
 
     private class WorkPaused : Exception()
 
-    private fun retryOrFail(message: String?): Result =
-        if (runAttemptCount < MAX_RETRIES) Result.retry() else failure(message)
+    private fun retryOrFail(checkpoint: TranscriptionCheckpoint, message: String?): Result = try {
+        if (checkpoint.retryAfterFailure(id.toString(), MAX_RETRIES)) Result.retry() else failure(message)
+    } catch (_: IOException) {
+        failure("Nie udało się zapisać postępu transkrypcji. Sprawdź wolne miejsce na urządzeniu.")
+    }
 
     private fun failure(message: String?): Result = Result.failure(
         Data.Builder()
