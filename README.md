@@ -2,7 +2,7 @@
 
 Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VAD działają lokalnie jako foreground service. Opcjonalna transkrypcja OpenAI uruchamia się dopiero po zamknięciu klipu.
 
-- wersja 1.4.0
+- wersja 1.4.1
 - Kotlin 2.4.10
 - Android Gradle Plugin 9.3.2 z wbudowanym Kotlinem
 - compileSdk / targetSdk 37 (Android 17)
@@ -77,3 +77,31 @@ Oczekiwany certyfikat release ma SHA-256:
 `c311a44e405ccfab2b822d5295c45e4dbbc6972516c3695dadb146b6149ec2b6`
 
 Pipeline po podpisaniu sprawdza ten fingerprint i przerywa build, jeśli skonfigurowano inny klucz. Klucza release nie wolno dodawać do repozytorium. Po opublikowaniu pierwszego APK trzeba zachować dokładnie ten sam klucz dla wszystkich kolejnych aktualizacji tego `applicationId`; APK podpisane innym kluczem nie zainstaluje się jako aktualizacja istniejącej aplikacji.
+
+## Wersja 1.4.1
+
+- Błąd kolejki transkrypcji nie usuwa poprawnie zapisanego WAV.
+- Ukończone fragmenty STT, transkrypcja i metadane są zapisywane atomowo w prywatnym katalogu aplikacji. Ponowienie korzysta z zapisanych wyników. Awaria przed otrzymaniem lub utrwaleniem odpowiedzi API nadal może wymagać ponownego żądania.
+- Długie zadania ustępują między etapami przed limitem czasu WorkManager; anulowanie odłącza aktywne połączenie HTTP.
+- Błąd odczytu AudioRecord uruchamia ponowną inicjalizację mikrofonu.
+- Lista nagrań, odczyt TXT, waveformy i wyszukiwanie brakujących transkrypcji w pamięci urządzenia działają poza głównym wątkiem. Przyciskiem odświeżania można wczytać nowo ukończone transkrypcje.
+- Ustawienia pokazują liczbę oczekujących zadań, błędy kolejki oraz komunikaty o kluczu, uprawnieniach i braku środków API.
+- CI uruchamia testy regresji, lint i kompilację obu wariantów. Testy HTTP korzystają wyłącznie z lokalnego serwera z odpowiedziami testowymi.
+
+### Instalacja obok wcześniejszych APK
+
+Wcześniejsze instalowalne APK 1.4.0 były podpisywane różnymi jednorazowymi certyfikatami debug. Zachowana kopia `speech-recorder-signing-backup.zip` zawiera osobny, stały klucz. Jego SHA-256: `afe1498136f756801c385653c7f34f1597a423da437398895f6a9d6c710d03a5`. Nie odpowiada on ani podpisom wcześniejszych APK, ani przypiętemu certyfikatowi historycznego wariantu release.
+
+Wariant `standalone` ma identyfikator `pl.lisu188.speechrecorder.stable` i nazwę `Dyktafon 1.4`. Służy do instalacji obok poprzedniej aplikacji, bez jej usuwania. Ustawienia klucza API i dostęp do folderu trzeba skonfigurować w nowej aplikacji. Starsze pliki pozostają na urządzeniu; lista MediaStore nowej aplikacji pokazuje jej własne nagrania. Przed rozpoczęciem nagrywania zatrzymaj nasłuch w poprzedniej aplikacji. Kolejne aktualizacje standalone należy podpisywać tym samym zachowanym kluczem.
+
+CI udostępnia niepodpisane APK obu wariantów. APK przeznaczone do instalacji musi być podpisane i zweryfikowane; samo powodzenie kompilacji nie oznacza instalowalnego pliku. Sekrety i kopia klucza pozostają poza repozytorium.
+
+### Sprawdzenie na telefonie
+
+1. Nadaj dostęp do mikrofonu, nagraj mowę i sprawdź odtwarzanie zapisanego WAV.
+2. Sprawdź zakończenie klipu po 8 sekundach ciszy oraz zapis po zatrzymaniu nagrywania.
+3. Włącz transkrypcję po zapisaniu klucza i wskazaniu folderu; sprawdź parę WAV/TXT o wspólnej nazwie.
+4. Przerwij połączenie podczas transkrypcji i sprawdź wznowienie oraz komunikaty kolejki.
+5. Sprawdź nasłuch z wygaszonym ekranem i po powrocie do aplikacji. Testy JVM nie potwierdzają zachowania rzeczywistego mikrofonu ani ograniczeń konkretnego telefonu.
+
+Podstawy integracji: [transkrypcja OpenAI](https://developers.openai.com/api/docs/guides/speech-to-text), [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna), [WorkManager](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/manage-work).

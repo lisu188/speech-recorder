@@ -139,7 +139,7 @@ class MainActivity : Activity() {
 
         content.addView(
             textView(
-                "Audio pozostaje na telefonie. Android pokazuje aktywność mikrofonu, gdy nasłuchiwanie jest włączone.",
+                "Nagrania są zapisywane na telefonie. Opcjonalna transkrypcja w ustawieniach wysyła zakończone klipy do OpenAI.",
                 13,
                 Color.GRAY,
             ).apply { setPadding(0, dp(18), 0, dp(8)) },

@@ -26,6 +26,7 @@ class RecorderRegressionTest {
         val context = RuntimeEnvironment.getApplication()
         WorkManagerTestInitHelper.initializeTestWorkManager(context)
         provider = RecordingProvider(File(context.cacheDir, "published.wav"))
+        provider.attachInfo(context, android.content.pm.ProviderInfo().apply { authority = "media" })
         ShadowContentResolver.registerProviderInternal("media", provider)
     }
 

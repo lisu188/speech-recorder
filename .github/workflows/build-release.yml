@@ -36,7 +36,7 @@ jobs:
         run: android sdk install platforms/android-37.0 build-tools/37.0.0
 
       - name: Test and build release APK
-        run: gradle --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease :app:assembleStandalone
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -58,6 +58,12 @@ jobs:
 
       - name: Prepare unsigned artifact
         run: cp app/build/outputs/apk/release/app-release-unsigned.apk SpeechRecorder-release-unsigned.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpeechRecorder-Standalone-Unsigned
+          path: app/build/outputs/apk/standalone/app-standalone-unsigned.apk
+          if-no-files-found: error
 
       - name: Check release signing configuration
         id: signing

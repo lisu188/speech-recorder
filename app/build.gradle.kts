@@ -24,6 +24,17 @@ android {
     }
 
     testOptions.unitTests.isIncludeAndroidResources = true
+
+    buildTypes {
+        create("standalone") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".stable"
+            matchingFallbacks += "release"
+            manifestPlaceholders["appLabel"] = "Dyktafon 1.4"
+        }
+    }
+
+    defaultConfig.manifestPlaceholders["appLabel"] = "Dyktafon"
 }
 
 dependencies {

@@ -381,6 +381,7 @@ class RecorderService : Service() {
                 uri?.let { resolver.delete(it, null, null) }
             } catch (_: Exception) {
             }
+            Log.w("SpeechRecorder", "Recording publication failed; preserving the local copy")
             fallbackSave(wavFile, fileName)
             return
         }
