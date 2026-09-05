@@ -15,6 +15,10 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.Observer
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 
 class SettingsActivity : Activity() {
     private lateinit var apiKeyInput: EditText
@@ -23,10 +27,31 @@ class SettingsActivity : Activity() {
     private lateinit var folderStatus: TextView
     private lateinit var deleteKeyButton: Button
     private lateinit var revokeFolderButton: Button
+    private lateinit var queueStatus: TextView
+    private var workStatus: LiveData<List<WorkInfo>>? = null
+    private val workObserver = Observer<List<WorkInfo>> { jobs ->
+        val pending = jobs.count { !it.state.isFinished }
+        val failures = jobs.filter { it.state == WorkInfo.State.FAILED }
+        queueStatus.text = buildString {
+            append("W kolejce lub w trakcie: $pending. Błędy: ${failures.size}.")
+            failures.firstOrNull()?.outputData?.getString(TranscriptionWorker.OUTPUT_ERROR)?.let {
+                append("\n$it")
+            }
+            if (failures.isNotEmpty()) append("\nPo usunięciu przyczyny wybierz transkrypcję brakujących nagrań.")
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
+        workStatus = WorkManager.getInstance(this).getWorkInfosByTagLiveData(TranscriptionScheduler.TAG).also {
+            it.observeForever(workObserver)
+        }
+    }
+
+    override fun onDestroy() {
+        workStatus?.removeObserver(workObserver)
+        super.onDestroy()
     }
 
     override fun onResume() {
@@ -136,6 +161,8 @@ class SettingsActivity : Activity() {
             isChecked = TranscriptionSettings.autoTranscribe(this@SettingsActivity)
         }
         content.addView(autoTranscribe, matchWrap().apply { topMargin = dp(8) })
+        queueStatus = textView("Sprawdzanie kolejki transkrypcji…", 14, Color.LTGRAY)
+        content.addView(queueStatus, matchWrap().apply { topMargin = dp(8) })
 
         content.addView(
             Button(this).apply {

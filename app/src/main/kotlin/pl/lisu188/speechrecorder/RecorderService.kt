@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.IBinder
 import android.provider.MediaStore
+import android.util.Log
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
@@ -218,7 +219,8 @@ class RecorderService : Service() {
 
             while (running.get()) {
                 val read = readFrame(record, frame)
-                if (read <= 0) continue
+                if (read < 0) throw IOException("AudioRecord read failed: $read")
+                if (read == 0) continue
                 if (read < frame.size) frame.fill(0, read, frame.size)
 
                 val stats = analyze(frame, read)
@@ -343,7 +345,7 @@ class RecorderService : Service() {
         return FrameStats(dbFs, zeroCrossings / length.toDouble())
     }
 
-    private fun publish(wavFile: File) {
+    internal fun publish(wavFile: File, schedule: (Uri) -> Unit = { TranscriptionScheduler.enqueue(this, it); Unit }) {
         if (!wavFile.exists() || wavFile.length() <= 44L) {
             wavFile.delete()
             return
@@ -367,17 +369,27 @@ class RecorderService : Service() {
                     ?: throw IOException("MediaStore output stream unavailable")
                 BufferedOutputStream(rawOutput).use { output -> input.copyTo(output, 32768) }
             }
-            resolver.update(
+            val published = resolver.update(
                 uri,
                 ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) },
                 null,
                 null,
             )
-            wavFile.delete()
-            uri?.let { TranscriptionScheduler.enqueue(this, it) }
+            if (published <= 0) throw IOException("MediaStore publication failed")
         } catch (_: Exception) {
-            uri?.let { resolver.delete(it, null, null) }
+            try {
+                uri?.let { resolver.delete(it, null, null) }
+            } catch (_: Exception) {
+            }
             fallbackSave(wavFile, fileName)
+            return
+        }
+
+        wavFile.delete()
+        try {
+            uri?.let(schedule)
+        } catch (_: Exception) {
+            Log.w("SpeechRecorder", "Recording saved; transcription could not be queued")
         }
     }
 

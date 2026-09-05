@@ -6,6 +6,7 @@ import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.io.RandomAccessFile
 
 object WavChunker {
@@ -18,9 +19,15 @@ object WavChunker {
 
     fun createChunks(context: Context, uri: Uri): List<File> {
         val directory = File(context.cacheDir, "transcription_chunks").apply { mkdirs() }
+        return context.contentResolver.openInputStream(uri)?.use { createChunks(it, directory) }
+            ?: throw IOException("Unable to open recording")
+    }
+
+    internal fun createChunks(rawInput: InputStream, directory: File): List<File> {
+        if (!directory.isDirectory && !directory.mkdirs()) throw IOException("Unable to create WAV chunks")
         val chunks = mutableListOf<File>()
 
-        context.contentResolver.openInputStream(uri)?.use { rawInput ->
+        try {
             BufferedInputStream(rawInput).use { input ->
                 val header = ByteArray(HEADER_SIZE)
                 var headerRead = 0
@@ -30,21 +37,24 @@ object WavChunker {
                     headerRead += read
                 }
                 validateHeader(header)
+                var remaining = littleEndianInt(header, 40).toLong() and 0xffffffffL
+                if (remaining == 0L || remaining % BYTES_PER_SAMPLE != 0L) throw IOException("Invalid PCM data size")
 
                 var index = 0
-                while (true) {
+                while (remaining > 0L) {
+                    if (Thread.currentThread().isInterrupted) throw IOException("Transcription cancelled")
                     val file = File.createTempFile("speech_${index}_", ".wav", directory)
-                    val dataBytes = writeChunk(input, file)
-                    if (dataBytes == 0L) {
-                        file.delete()
-                        break
-                    }
-                    patchHeader(file, dataBytes)
                     chunks += file
+                    val dataBytes = writeChunk(input, file, minOf(remaining, MAX_PCM_BYTES.toLong()))
+                    patchHeader(file, dataBytes)
+                    remaining -= dataBytes
                     index++
                 }
             }
-        } ?: throw IOException("Unable to open recording")
+        } catch (error: Exception) {
+            chunks.forEach { it.delete() }
+            throw error
+        }
 
         if (chunks.isEmpty()) throw IOException("Recording contains no PCM data")
         return chunks
@@ -58,20 +68,23 @@ object WavChunker {
         val sampleRate = littleEndianInt(header, 24)
         val bitsPerSample = littleEndianShort(header, 34)
 
-        if (riff != "RIFF" || wave != "WAVE" || format != 1 || channels != CHANNELS || sampleRate != SAMPLE_RATE || bitsPerSample != 16) {
+        if (riff != "RIFF" || wave != "WAVE" || format != 1 || channels != CHANNELS || sampleRate != SAMPLE_RATE || bitsPerSample != 16 ||
+            String(header, 12, 4, Charsets.US_ASCII) != "fmt " || littleEndianInt(header, 16) != 16 ||
+            String(header, 36, 4, Charsets.US_ASCII) != "data"
+        ) {
             throw IOException("Unsupported WAV format")
         }
     }
 
-    private fun writeChunk(input: BufferedInputStream, file: File): Long {
+    private fun writeChunk(input: BufferedInputStream, file: File, bytesToWrite: Long): Long {
         var written = 0L
         FileOutputStream(file).buffered().use { output ->
             output.write(ByteArray(HEADER_SIZE))
             val buffer = ByteArray(64 * 1024)
-            while (written < MAX_PCM_BYTES) {
-                val remaining = (MAX_PCM_BYTES - written).coerceAtMost(buffer.size.toLong()).toInt()
+            while (written < bytesToWrite) {
+                val remaining = (bytesToWrite - written).coerceAtMost(buffer.size.toLong()).toInt()
                 val read = input.read(buffer, 0, remaining)
-                if (read < 0) break
+                if (read < 0) throw IOException("WAV data is incomplete")
                 if (read == 0) continue
                 output.write(buffer, 0, read)
                 written += read

@@ -98,7 +98,9 @@ class TranscriptStore(private val context: Context) {
         }
     }
 
-    fun loadDocuments(): Map<String, TranscriptDocument> {
+    fun documentNames(): Set<String> = loadDocuments(includeText = false).keys
+
+    fun loadDocuments(includeText: Boolean = true): Map<String, TranscriptDocument> {
         val treeUri = TranscriptFolderAccess.load(context) ?: return emptyMap()
         val result = linkedMapOf<String, TranscriptDocument>()
         queryChildren(treeUri)?.use { cursor ->
@@ -108,7 +110,7 @@ class TranscriptStore(private val context: Context) {
                 val name = cursor.getString(nameColumn)
                 if (!name.endsWith(".txt", ignoreCase = true) || name.startsWith("pending_")) continue
                 val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, cursor.getString(idColumn))
-                val text = readText(uri)
+                val text = if (includeText) readText(uri) else ""
                 result[name.dropLast(4)] = TranscriptDocument(
                     uri = uri,
                     displayName = name,
