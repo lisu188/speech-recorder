@@ -35,11 +35,35 @@ jobs:
       - name: Install Android 17 SDK
         run: android sdk install platforms/android-37.0 build-tools/37.0.0
 
-      - name: Build release APK
-        run: gradle --no-daemon :app:assembleRelease
+      - name: Test and build release APK
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease :app:assembleStandalone
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: SpeechRecorder-Test-Reports
+          path: |
+            app/build/reports/tests/
+            app/build/reports/lint-results-release.*
+          if-no-files-found: ignore
+
+      - name: Prepare local signing verifier
+        run: cp "$ANDROID_HOME/build-tools/37.0.0/lib/apksigner.jar" apksigner.jar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpeechRecorder-APK-Signer
+          path: apksigner.jar
+          if-no-files-found: error
 
       - name: Prepare unsigned artifact
         run: cp app/build/outputs/apk/release/app-release-unsigned.apk SpeechRecorder-release-unsigned.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpeechRecorder-Standalone-Unsigned
+          path: app/build/outputs/apk/standalone/app-standalone-unsigned.apk
+          if-no-files-found: error
 
       - name: Check release signing configuration
         id: signing

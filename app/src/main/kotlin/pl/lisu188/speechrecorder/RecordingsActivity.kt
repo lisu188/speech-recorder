@@ -30,6 +30,8 @@ import java.io.FileInputStream
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.sqrt
@@ -44,12 +46,13 @@ class RecordingsActivity : Activity() {
     private lateinit var nowPlaying: TextView
     private lateinit var search: EditText
     private lateinit var sort: Spinner
-    private var transcriptDocuments: Map<String, TranscriptStore.TranscriptDocument> = emptyMap()
+    private val loadExecutor = Executors.newSingleThreadExecutor()
+    private var loadTask: Future<*>? = null
+    private var loadGeneration = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
-        loadRecordings()
     }
 
     override fun onResume() {
@@ -58,6 +61,9 @@ class RecordingsActivity : Activity() {
     }
 
     override fun onDestroy() {
+        loadGeneration++
+        loadTask?.cancel(true)
+        loadExecutor.shutdownNow()
         stopPlayback()
         super.onDestroy()
     }
@@ -78,6 +84,10 @@ class RecordingsActivity : Activity() {
             setPadding(0, dp(4), 0, dp(14))
         }
         content.addView(summary, matchWrap())
+        content.addView(Button(this).apply {
+            text = "ODŚWIEŻ NAGRANIA"
+            setOnClickListener { loadRecordings() }
+        }, matchWrap())
 
         search = EditText(this).apply {
             hint = "Szukaj w nazwach i transkrypcjach"
@@ -128,13 +138,32 @@ class RecordingsActivity : Activity() {
     }
 
     private fun loadRecordings() {
-        recordings.clear()
-        transcriptDocuments = try {
-            TranscriptStore(this).loadDocuments()
-        } catch (_: Exception) {
-            emptyMap()
+        val generation = ++loadGeneration
+        loadTask?.cancel(true)
+        summary.text = "Wczytywanie nagrań…"
+        loadTask = loadExecutor.submit {
+            try {
+                val loaded = queryRecordings()
+                runOnUiThread {
+                    if (generation == loadGeneration && !isDestroyed) {
+                        recordings.clear()
+                        recordings.addAll(loaded)
+                        applyFilterAndSort()
+                    }
+                }
+            } catch (_: Exception) {
+                runOnUiThread {
+                    if (generation == loadGeneration && !isDestroyed) {
+                        applyFilterAndSort()
+                        Toast.makeText(this, "Nie udało się odczytać nagrań", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
         }
+    }
 
+    private fun queryRecordings(): List<Recording> {
+        val documents = TranscriptStore(this).loadDocuments()
         val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
@@ -144,21 +173,21 @@ class RecordingsActivity : Activity() {
             MediaStore.Audio.Media.DURATION,
         )
 
-        try {
-            contentResolver.query(
+        return contentResolver.query(
                 collection,
                 projection,
                 "${MediaStore.Audio.Media.RELATIVE_PATH}=?",
                 arrayOf(TranscriptStore.RELATIVE_PATH_QUERY),
                 null,
-            )?.use { cursor -> readRecordings(cursor, collection) }
-        } catch (_: Exception) {
-            Toast.makeText(this, "Nie udało się odczytać nagrań", Toast.LENGTH_LONG).show()
-        }
-        applyFilterAndSort()
+            )?.use { cursor -> readRecordings(cursor, collection, documents) }.orEmpty()
     }
 
-    private fun readRecordings(cursor: Cursor, collection: Uri) {
+    private fun readRecordings(
+        cursor: Cursor,
+        collection: Uri,
+        documents: Map<String, TranscriptStore.TranscriptDocument>,
+    ): List<Recording> {
+        val loaded = mutableListOf<Recording>()
         val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
         val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
         val dateColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
@@ -166,11 +195,13 @@ class RecordingsActivity : Activity() {
         val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
 
         while (cursor.moveToNext()) {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
             val uri = ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
             val name = cursor.getString(nameColumn)
+            if (!name.endsWith(".wav", ignoreCase = true)) continue
             val duration = cursor.getLong(durationColumn).takeIf { it > 0L } ?: readDuration(uri)
-            val transcript = transcriptDocuments[name.substringBeforeLast('.')]
-            recordings += Recording(
+            val transcript = documents[name.substringBeforeLast('.')]
+            loaded += Recording(
                 uri = uri,
                 name = name,
                 dateAdded = cursor.getLong(dateColumn) * 1000L,
@@ -182,6 +213,7 @@ class RecordingsActivity : Activity() {
                 transcriptSummary = transcript?.summary.orEmpty(),
             )
         }
+        return loaded
     }
 
     private fun applyFilterAndSort() {

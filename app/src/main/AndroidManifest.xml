@@ -10,7 +10,7 @@
         android:allowBackup="false"
         android:icon="@drawable/ic_mic_app"
         android:roundIcon="@drawable/ic_mic_app"
-        android:label="Dyktafon"
+        android:label="${appLabel}"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
             android:name=".SettingsActivity"

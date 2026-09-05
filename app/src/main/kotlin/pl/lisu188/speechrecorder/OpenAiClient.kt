@@ -14,19 +14,44 @@ import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
-class OpenAiClient {
-    fun transcribe(context: Context, audioUri: Uri, apiKey: String): String {
+class OpenAiClient(
+    private val transcriptionsUrl: String = TRANSCRIPTIONS_URL,
+    private val responsesUrl: String = RESPONSES_URL,
+) {
+    @Volatile private var activeConnection: HttpURLConnection? = null
+    @Volatile private var cancelled = false
+
+    fun cancel() {
+        cancelled = true
+        activeConnection?.disconnect()
+    }
+
+    fun transcribe(
+        context: Context,
+        audioUri: Uri,
+        apiKey: String,
+        checkpoint: TranscriptionCheckpoint,
+        beforeRequest: () -> Unit,
+    ): String {
         val chunks = WavChunker.createChunks(context, audioUri)
         return try {
-            chunks.mapIndexed { index, chunk ->
-                transcribeChunk(chunk, apiKey, index)
-            }.filter { it.isNotBlank() }
-                .joinToString("\n\n")
-                .trim()
+            transcribeChunks(chunks, apiKey, checkpoint, beforeRequest)
         } finally {
             chunks.forEach { it.delete() }
         }
     }
+
+    internal fun transcribeChunks(
+        chunks: List<File>,
+        apiKey: String,
+        checkpoint: TranscriptionCheckpoint,
+        beforeRequest: () -> Unit,
+    ): String = chunks.mapIndexed { index, chunk ->
+        checkpoint.remember("chunk_$index") {
+            beforeRequest()
+            transcribeChunk(chunk, apiKey, index)
+        }
+    }.filter { it.isNotBlank() }.joinToString("\n\n").trim()
 
     fun createMetadata(transcript: String, apiKey: String): ConversationMetadata {
         if (transcript.isBlank()) {
@@ -82,7 +107,7 @@ class OpenAiClient {
                 ),
             )
 
-        val response = executeJson(RESPONSES_URL, body, apiKey, READ_TIMEOUT_MS)
+        val response = executeJson(responsesUrl, body, apiKey, READ_TIMEOUT_MS)
         val outputText = extractOutputText(response)
             ?: throw OpenAiException(500, "OpenAI response did not contain output text", true)
         val metadata = JSONObject(outputText)
@@ -94,7 +119,7 @@ class OpenAiClient {
 
     private fun transcribeChunk(file: File, apiKey: String, index: Int): String {
         val boundary = "----SpeechRecorder${UUID.randomUUID()}"
-        val connection = (URL(TRANSCRIPTIONS_URL).openConnection() as HttpURLConnection).apply {
+        val connection = (URL(transcriptionsUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = TRANSCRIPTION_READ_TIMEOUT_MS
@@ -107,8 +132,10 @@ class OpenAiClient {
         }
 
         try {
+            activate(connection)
             BufferedOutputStream(connection.outputStream).use { output ->
                 writeFormField(output, boundary, "model", TRANSCRIPTION_MODEL)
+                writeFormField(output, boundary, "response_format", "json")
                 output.write("--$boundary\r\n".toByteArray(StandardCharsets.UTF_8))
                 output.write(
                     "Content-Disposition: form-data; name=\"file\"; filename=\"speech_${index + 1}.wav\"\r\n".toByteArray(
@@ -123,12 +150,15 @@ class OpenAiClient {
             val status = connection.responseCode
             val responseBody = readResponse(connection, status)
             if (status !in 200..299) throw apiError(status, responseBody)
-            return JSONObject(responseBody).optString("text").trim()
+            val response = JSONObject(responseBody)
+            if (!response.has("text")) throw OpenAiException(502, "Missing transcription text", true)
+            return response.getString("text").trim()
         } catch (error: OpenAiException) {
             throw error
         } catch (error: IOException) {
             throw OpenAiException(0, error.message ?: "Network error", true, error)
         } finally {
+            activeConnection = null
             connection.disconnect()
         }
     }
@@ -153,6 +183,7 @@ class OpenAiClient {
         }
 
         try {
+            activate(connection)
             BufferedOutputStream(connection.outputStream).use { output ->
                 output.write(body.toString().toByteArray(StandardCharsets.UTF_8))
             }
@@ -165,8 +196,14 @@ class OpenAiClient {
         } catch (error: IOException) {
             throw OpenAiException(0, error.message ?: "Network error", true, error)
         } finally {
+            activeConnection = null
             connection.disconnect()
         }
+    }
+
+    private fun activate(connection: HttpURLConnection) {
+        activeConnection = connection
+        if (cancelled || Thread.currentThread().isInterrupted) throw IOException("Transcription cancelled")
     }
 
     private fun readResponse(connection: HttpURLConnection, status: Int): String {
@@ -175,14 +212,17 @@ class OpenAiClient {
     }
 
     private fun apiError(status: Int, responseBody: String): OpenAiException {
-        val message = try {
-            JSONObject(responseBody).optJSONObject("error")?.optString("message")
-                ?.takeIf { it.isNotBlank() }
-                ?: "OpenAI HTTP $status"
-        } catch (_: Exception) {
-            "OpenAI HTTP $status"
+        val code = try {
+            JSONObject(responseBody).optJSONObject("error")?.optString("code").orEmpty()
+        } catch (_: Exception) { "" }
+        val message = when {
+            status == 401 -> "Klucz OpenAI jest nieprawidłowy lub wygasł. Zapisz poprawny klucz w ustawieniach."
+            status == 403 -> "Klucz OpenAI nie ma dostępu do wybranego modelu. Sprawdź uprawnienia projektu."
+            code == "insufficient_quota" -> "Brak środków lub przekroczony limit wydatków OpenAI API."
+            status == 429 -> "Limit zapytań OpenAI. Transkrypcja zostanie ponowiona."
+            else -> "OpenAI HTTP $status"
         }
-        val retryable = status == 408 || status == 409 || status == 429 || status >= 500
+        val retryable = code != "insufficient_quota" && (status == 408 || status == 409 || status == 429 || status >= 500)
         return OpenAiException(status, message, retryable)
     }
 

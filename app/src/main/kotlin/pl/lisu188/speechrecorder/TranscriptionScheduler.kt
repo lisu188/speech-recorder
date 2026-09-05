@@ -14,9 +14,11 @@ import androidx.work.WorkManager
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
 
 object TranscriptionScheduler {
-    private const val TAG = "speech-recorder-transcription"
+    const val TAG = "speech-recorder-transcription"
+    private val queueExecutor = Executors.newSingleThreadExecutor()
 
     fun enqueue(context: Context, audioUri: Uri): Boolean {
         if (!canTranscribe(context)) return false
@@ -41,9 +43,20 @@ object TranscriptionScheduler {
     }
 
     fun enqueueMissing(context: Context) {
+        val appContext = context.applicationContext
+        queueExecutor.execute {
+            try {
+                enqueueMissingNow(appContext)
+            } catch (_: Exception) {
+                android.util.Log.w("SpeechRecorder", "Unable to queue missing transcriptions")
+            }
+        }
+    }
+
+    private fun enqueueMissingNow(context: Context) {
         if (!canTranscribe(context)) return
 
-        val transcriptNames = TranscriptStore(context).loadDocuments().keys
+        val transcriptNames = TranscriptStore(context).documentNames()
         val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
