@@ -2,7 +2,7 @@
 
 Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VAD działają lokalnie jako foreground service. Opcjonalna transkrypcja OpenAI uruchamia się dopiero po zamknięciu klipu.
 
-- wersja 1.4.1
+- wersja 1.4.2
 - Kotlin 2.4.10
 - Android Gradle Plugin 9.3.2 z wbudowanym Kotlinem
 - compileSdk / targetSdk 37 (Android 17)
@@ -33,7 +33,7 @@ Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VA
 
 ## Pliki
 
-Przed transkrypcją nagranie ma techniczną nazwę `speech_YYYYMMDD_HHMMSS.wav`.
+Przed transkrypcją nagranie ma techniczną nazwę `speech_YYYYMMDD_HHMMSS_mmm_UUID.wav`.
 
 Po poprawnej transkrypcji aplikacja tworzy parę o wspólnej nazwie bazowej:
 
@@ -78,6 +78,27 @@ Oczekiwany certyfikat release ma SHA-256:
 
 Pipeline po podpisaniu sprawdza ten fingerprint i przerywa build, jeśli skonfigurowano inny klucz. Klucza release nie wolno dodawać do repozytorium. Po opublikowaniu pierwszego APK trzeba zachować dokładnie ten sam klucz dla wszystkich kolejnych aktualizacji tego `applicationId`; APK podpisane innym kluczem nie zainstaluje się jako aktualizacja istniejącej aplikacji.
 
+## Wersja 1.4.2
+
+- Aktywne WAV-y trafiają do trwałego, prywatnego katalogu aplikacji zamiast do cache. Po ponownym otwarciu aplikacji lub odtworzeniu usługi aplikacja odzyskuje osierocone pliki: sprawdza format PCM, naprawia długości w nagłówku i publikuje kompletne próbki. Nie odtworzy audio, którego system nie zdążył zapisać, ani plików usuniętych przez czyszczenie danych lub odinstalowanie aplikacji.
+- Kopiowanie do MediaStore działa w osobnym zadaniu WorkManager, nie w pętli odczytu mikrofonu. Błąd zapisu zachowuje lokalny WAV i uruchamia ponowienie.
+- Blokada pliku chroni aktywne nagranie przed odzyskiwaniem. Atomowy zapis URI publikacji pozwala wznowić zapis bez tworzenia kolejnej kopii, również po zmianie nazwy przez transkrypcję. Odzyskiwanie obejmuje pozostawione przez starszą wersję pliki cache i awaryjne kopie w jej prywatnym katalogu zewnętrznym.
+- Ekran główny nie uznaje zapisanej preferencji za dowód działania mikrofonu. Błędy uprawnień, startu usługi i przechowywania są widoczne w aplikacji; zatrzymanie nie czeka na zakończenie wątku nagrywającego na głównym wątku interfejsu.
+- Lista nagrań odświeża się po publikacji WAV i ukończeniu transkrypcji. Niedokończone wpisy MediaStore nie trafiają do listy ani do automatycznej transkrypcji.
+- Dodano testy odzyskiwania, blokad, uszkodzonych nagłówków, błędów publikacji, migracji i braku uprawnienia mikrofonu. CI zapisuje źródła oraz raporty XML i HTML.
+
+### Podpisywanie istniejącego wariantu standalone
+
+CI obsługuje dodatkowo cztery sekrety dla zachowanego klucza standalone: `STANDALONE_KEYSTORE_BASE64`, `STANDALONE_KEYSTORE_PASSWORD`, `STANDALONE_KEY_ALIAS`, `STANDALONE_KEY_PASSWORD`. Wszystkie cztery muszą być ustawione razem. Przy braku całego zestawu kompilacja tworzy wyraźnie oznaczone niepodpisane APK; nie oznacza to pliku gotowego do instalacji. Przy niepełnym zestawie lub niewłaściwym certyfikacie podpisywanie kończy się błędem.
+
+Skrypt `scripts/sign-apk.sh` działa w Bash/Linux/WSL i weryfikuje przypięty certyfikat przed udostępnieniem finalnego APK. Nie generuje nowych kluczy i nie zastępuje wcześniejszej tożsamości aplikacji. Wymaga istniejącego keystore oraz zmiennych `SIGNING_KEYSTORE_PATH`, `SIGNING_KEY_ALIAS`, `SIGNING_KEYSTORE_PASSWORD`, `SIGNING_KEY_PASSWORD`. Podpisywarkę wybiera przez `APKSIGNER_JAR`, `APKSIGNER` lub Android SDK w `ANDROID_HOME`.
+
+```bash
+bash scripts/sign-apk.sh standalone app-standalone-unsigned.apk SpeechRecorder-1.4.2.apk
+```
+
+Wynikiem jest zweryfikowane APK i plik `.sha256`. Istniejący plik wyjściowy nie jest nadpisywany. Nie dodawaj keystore ani haseł do repozytorium. Wersja 1.4.2 zachowuje oba dotychczasowe identyfikatory aplikacji i wymaga odpowiedniego wcześniejszego klucza do instalacji jako aktualizacja.
+
 ## Wersja 1.4.1
 
 - Błąd kolejki transkrypcji nie usuwa poprawnie zapisanego WAV.
@@ -102,6 +123,7 @@ CI udostępnia niepodpisane APK obu wariantów. APK przeznaczone do instalacji m
 2. Sprawdź zakończenie klipu po 8 sekundach ciszy oraz zapis po zatrzymaniu nagrywania.
 3. Włącz transkrypcję po zapisaniu klucza i wskazaniu folderu; sprawdź parę WAV/TXT o wspólnej nazwie.
 4. Przerwij połączenie podczas transkrypcji i sprawdź wznowienie oraz komunikaty kolejki.
-5. Sprawdź nasłuch z wygaszonym ekranem i po powrocie do aplikacji. Testy JVM nie potwierdzają zachowania rzeczywistego mikrofonu ani ograniczeń konkretnego telefonu.
+5. W trakcie aktywnego klipu przerwij proces aplikacji, następnie otwórz ją ponownie i sprawdź odzyskany WAV oraz brak duplikatów. Force stop wymaga ponownego uruchomienia przez użytkownika.
+6. Sprawdź nasłuch z wygaszonym ekranem i po powrocie do aplikacji. Testy JVM nie potwierdzają zachowania rzeczywistego mikrofonu ani ograniczeń konkretnego telefonu.
 
 Podstawy integracji: [transkrypcja OpenAI](https://developers.openai.com/api/docs/guides/speech-to-text), [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna), [WorkManager](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/manage-work).
