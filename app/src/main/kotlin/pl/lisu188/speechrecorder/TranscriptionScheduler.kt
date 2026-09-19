@@ -66,7 +66,7 @@ object TranscriptionScheduler {
         context.contentResolver.query(
             collection,
             projection,
-            "${MediaStore.Audio.Media.RELATIVE_PATH}=?",
+            "${MediaStore.Audio.Media.RELATIVE_PATH}=? AND ${MediaStore.Audio.Media.IS_PENDING}=0",
             arrayOf(TranscriptStore.RELATIVE_PATH_QUERY),
             null,
         )?.use { cursor ->
