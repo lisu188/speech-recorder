@@ -34,6 +34,10 @@ class MainActivity : Activity() {
 
     private val levelReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == RecordingStorage.ACTION_LIBRARY_CHANGED) {
+                renderState()
+                return
+            }
             if (intent?.action != RecorderService.ACTION_LEVEL) return
             levelMeter.progress = intent.getIntExtra(RecorderService.EXTRA_LEVEL, 0)
             speechActive = intent.getBooleanExtra(RecorderService.EXTRA_SPEECH, false)
@@ -52,6 +56,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
+        RecordingStorage.recover(this)
+        TranscriptionScheduler.enqueueMissing(this)
         if (intent.action == ACTION_RESUME_AFTER_BOOT) requestAndStart()
     }
 
@@ -71,7 +77,9 @@ class MainActivity : Activity() {
 
     private fun registerLevelReceiver() {
         if (receiverRegistered) return
-        val filter = IntentFilter(RecorderService.ACTION_LEVEL)
+        val filter = IntentFilter(RecorderService.ACTION_LEVEL).apply {
+            addAction(RecordingStorage.ACTION_LIBRARY_CHANGED)
+        }
         ContextCompat.registerReceiver(this, levelReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         receiverRegistered = true
     }
@@ -147,12 +155,14 @@ class MainActivity : Activity() {
     }
 
     private fun toggleRecorder() {
-        if (prefs().getBoolean("enabled", false)) stopRecorder() else requestAndStart()
+        if (prefs().getBoolean("enabled", false) && RecorderService.isRunning) stopRecorder() else requestAndStart()
     }
 
     private fun renderState() {
-        val enabled = prefs().getBoolean("enabled", false)
+        val enabled = prefs().getBoolean("enabled", false) && RecorderService.isRunning
         val last = prefs().getLong("last_speech", 0L)
+        speechActive = prefs().getBoolean("speech_active", false)
+        val captureError = prefs().getString("capture_error", null)
 
         when {
             !enabled -> {
@@ -173,6 +183,9 @@ class MainActivity : Activity() {
                 primaryAction.text = "ZATRZYMAJ"
             }
         }
+
+        if (captureError != null) statusSubtitle.text = captureError
+        prefs().getString("storage_error", null)?.let { statusSubtitle.append("\n$it") }
 
         lastSpeech.text = if (last > 0L) {
             "Ostatnia mowa: ${DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(last))}"
@@ -211,8 +224,13 @@ class MainActivity : Activity() {
     }
 
     private fun startRecorder() {
-        prefs().edit().putBoolean("enabled", true).apply()
-        startForegroundService(Intent(this, RecorderService::class.java).setAction(RecorderService.ACTION_START))
+        try {
+            startForegroundService(Intent(this, RecorderService::class.java).setAction(RecorderService.ACTION_START))
+            prefs().edit().putBoolean("enabled", true).remove("capture_error").apply()
+        } catch (_: RuntimeException) {
+            prefs().edit().putBoolean("enabled", false)
+                .putString("capture_error", "Nie można uruchomić mikrofonu. Sprawdź uprawnienia i spróbuj ponownie.").apply()
+        }
         renderState()
     }
 

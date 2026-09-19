@@ -6,7 +6,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -16,21 +15,15 @@ import android.media.MediaRecorder
 import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.os.IBinder
-import android.provider.MediaStore
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
-import java.text.SimpleDateFormat
 import java.util.ArrayDeque
-import java.util.Date
-import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.log10
 import kotlin.math.max
@@ -40,21 +33,26 @@ import kotlin.math.sqrt
 
 class RecorderService : Service() {
     private val running = AtomicBoolean(false)
+    private val serviceToken = Any()
     private var worker: Thread? = null
-    private var audioRecord: AudioRecord? = null
+    @Volatile private var audioRecord: AudioRecord? = null
     private var noiseSuppressor: NoiseSuppressor? = null
     private var lastLevelBroadcastMs = 0L
     private var lastSpeechTimestamp = 0L
+    @Volatile private var destroyed = false
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         lastSpeechTimestamp = prefs().getLong("last_speech", 0L)
+        RecordingStorage.recover(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_START
         if (action == ACTION_STOP) {
+            activeService.compareAndSet(serviceToken, null)
             prefs().edit()
                 .putBoolean("enabled", false)
                 .putBoolean("speech_active", false)
@@ -66,8 +64,22 @@ class RecorderService : Service() {
             return START_NOT_STICKY
         }
 
-        prefs().edit().putBoolean("enabled", true).apply()
-        startAsForeground(false)
+        if (action != ACTION_START) return START_NOT_STICKY
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            stopWithError("Brak dostępu do mikrofonu. Nadaj uprawnienie i rozpocznij nagrywanie ponownie.")
+            return START_NOT_STICKY
+        }
+        try {
+            startAsForeground(prefs().getBoolean("speech_active", false))
+        } catch (_: SecurityException) {
+            stopWithError("Android zablokował mikrofon. Otwórz aplikację i rozpocznij nagrywanie ponownie.")
+            return START_NOT_STICKY
+        } catch (_: IllegalStateException) {
+            stopWithError("Android zablokował start w tle. Otwórz aplikację i rozpocznij nagrywanie ponownie.")
+            return START_NOT_STICKY
+        }
+        activeService.set(serviceToken)
+        prefs().edit().putBoolean("enabled", true).remove("capture_error").apply()
         if (!running.get()) startCapture()
         return START_STICKY
     }
@@ -75,6 +87,8 @@ class RecorderService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        destroyed = true
+        activeService.compareAndSet(serviceToken, null)
         prefs().edit().putBoolean("speech_active", false).apply()
         sendLevelBroadcast(0, false)
         stopCapture()
@@ -95,11 +109,20 @@ class RecorderService : Service() {
     }
 
     private fun updateNotification(speechActive: Boolean) {
-        prefs().edit().putBoolean("speech_active", speechActive).apply()
-        getSystemService(NotificationManager::class.java).notify(
-            NOTIFICATION_ID,
-            buildNotification(speechActive),
-        )
+        val active = running.get() && prefs().getBoolean("enabled", false) && !destroyed
+        prefs().edit().putBoolean("speech_active", speechActive && active).apply()
+        val manager = getSystemService(NotificationManager::class.java)
+        if (active) manager.notify(NOTIFICATION_ID, buildNotification(speechActive))
+    }
+
+    private fun stopWithError(message: String) {
+        activeService.compareAndSet(serviceToken, null)
+        prefs().edit().putBoolean("enabled", false).putBoolean("speech_active", false)
+            .putString("capture_error", message).apply()
+        stopCapture()
+        sendLevelBroadcast(0, false)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun buildNotification(speechActive: Boolean): Notification {
@@ -141,12 +164,25 @@ class RecorderService : Service() {
 
     private fun startCapture() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            prefs().edit().putBoolean("enabled", false).apply()
-            stopSelf()
+            stopWithError("Brak dostępu do mikrofonu. Nadaj uprawnienie i spróbuj ponownie.")
             return
         }
+        if (worker?.isAlive == true || destroyed) return
         running.set(true)
-        worker = Thread(::captureSupervisorLoop, "speech-recorder-capture").also { it.start() }
+        worker = Thread({
+            try {
+                captureSupervisorLoop()
+            } finally {
+                running.set(false)
+                val finished = Thread.currentThread()
+                mainHandler.post {
+                    if (worker === finished) {
+                        worker = null
+                        if (!destroyed && prefs().getBoolean("enabled", false)) startCapture()
+                    }
+                }
+            }
+        }, "speech-recorder-capture").also { it.start() }
     }
 
     private fun stopCapture() {
@@ -157,16 +193,6 @@ class RecorderService : Service() {
             } catch (_: IllegalStateException) {
             }
         }
-        worker
-            ?.takeIf { it !== Thread.currentThread() }
-            ?.let {
-                try {
-                    it.join(1200)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                }
-            }
-        worker = null
     }
 
     private fun captureSupervisorLoop() {
@@ -194,9 +220,7 @@ class RecorderService : Service() {
 
         try {
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                prefs().edit().putBoolean("enabled", false).apply()
-                running.set(false)
-                stopSelf()
+                stopWithError("Brak dostępu do mikrofonu. Nadaj uprawnienie i spróbuj ponownie.")
                 return
             }
             val minBuffer = AudioRecord.getMinBufferSize(
@@ -221,6 +245,8 @@ class RecorderService : Service() {
             }
 
             record.startRecording()
+            check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Microphone did not start" }
+            prefs().edit().remove("capture_error").apply()
             val frame = ShortArray(FRAME_SAMPLES)
 
             while (running.get()) {
@@ -258,7 +284,7 @@ class RecorderService : Service() {
                 }
 
                 if (sink == null && consecutiveSpeechFrames >= SPEECH_FRAMES_TO_START) {
-                    sink = WavSink(File(cacheDir, "speech_${System.nanoTime()}.wav"), SAMPLE_RATE)
+                    sink = WavSink(RecordingStorage.newFile(this, now - prebuffer.size * FRAME_MS), SAMPLE_RATE)
                     prebuffer.forEach { sink.write(it, it.size) }
                     clipFrames = prebuffer.size
                     rememberSpeech(now)
@@ -273,7 +299,7 @@ class RecorderService : Service() {
                 if (silenceFrames >= SILENCE_FRAMES_TO_STOP || clipFrames >= MAX_CLIP_FRAMES) {
                     val completed = activeSink.closeAndGetFile()
                     sink = null
-                    publish(completed)
+                    RecordingStorage.enqueue(this, completed)
                     silenceFrames = 0
                     consecutiveSpeechFrames = 0
                     clipFrames = 0
@@ -282,17 +308,26 @@ class RecorderService : Service() {
                     sendLevelBroadcast(mapLevel(stats.dbFs), false)
                 }
             }
+        } catch (_: SecurityException) {
+            stopWithError("Utracono dostęp do mikrofonu. Nadaj uprawnienie i rozpocznij nagrywanie ponownie.")
         } catch (_: Exception) {
+            if (running.get()) {
+                Log.w("SpeechRecorder", "Audio capture interrupted; retrying microphone initialization")
+                prefs().edit().putString("capture_error", "Przerwano odczyt mikrofonu. Ponawiam połączenie.").apply()
+            }
         } finally {
             sink?.let {
                 try {
-                    publish(it.closeAndGetFile())
+                    RecordingStorage.enqueue(this, it.closeAndGetFile())
                 } catch (_: Exception) {
                 }
             }
             updateNotification(false)
             sendLevelBroadcast(0, false)
-            noiseSuppressor?.release()
+            try {
+                noiseSuppressor?.release()
+            } catch (_: RuntimeException) {
+            }
             noiseSuppressor = null
             audioRecord?.let {
                 try {
@@ -327,6 +362,7 @@ class RecorderService : Service() {
         while (offset < frame.size && running.get()) {
             val read = record.read(frame, offset, frame.size - offset, AudioRecord.READ_BLOCKING)
             if (read < 0) return read
+            if (read == 0) throw IOException("AudioRecord returned no samples")
             offset += read
         }
         return offset
@@ -352,84 +388,29 @@ class RecorderService : Service() {
     }
 
     internal fun publish(wavFile: File, schedule: (Uri) -> Unit = { TranscriptionScheduler.enqueue(this, it); Unit }) {
-        if (!wavFile.exists() || wavFile.length() <= 44L) {
-            wavFile.delete()
-            return
-        }
-
-        val fileName = "speech_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.wav"
-        val resolver = contentResolver
-        val values = ContentValues().apply {
-            put(MediaStore.Audio.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Audio.Media.MIME_TYPE, "audio/wav")
-            put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/SpeechRecorder")
-            put(MediaStore.Audio.Media.IS_PENDING, 1)
-        }
-
-        var uri: Uri? = null
-        try {
-            uri = resolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
-                ?: throw IOException("MediaStore insert failed")
-            BufferedInputStream(FileInputStream(wavFile)).use { input ->
-                val rawOutput = resolver.openOutputStream(uri)
-                    ?: throw IOException("MediaStore output stream unavailable")
-                BufferedOutputStream(rawOutput).use { output -> input.copyTo(output, 32768) }
-            }
-            val published = resolver.update(
-                uri,
-                ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) },
-                null,
-                null,
-            )
-            if (published <= 0) throw IOException("MediaStore publication failed")
-        } catch (_: Exception) {
-            try {
-                uri?.let { resolver.delete(it, null, null) }
-            } catch (_: Exception) {
-            }
-            Log.w("SpeechRecorder", "Recording publication failed; preserving the local copy")
-            fallbackSave(wavFile, fileName)
-            return
-        }
-
-        wavFile.delete()
-        try {
-            uri?.let(schedule)
-        } catch (_: Exception) {
-            Log.w("SpeechRecorder", "Recording saved; transcription could not be queued")
-        }
-    }
-
-    private fun fallbackSave(wavFile: File, fileName: String) {
-        val base = getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: return
-        val directory = File(base, "SpeechRecorder")
-        if (!directory.exists() && !directory.mkdirs()) return
-
-        try {
-            BufferedInputStream(FileInputStream(wavFile)).use { input ->
-                BufferedOutputStream(FileOutputStream(File(directory, fileName))).use { output ->
-                    input.copyTo(output, 32768)
-                }
-            }
-            wavFile.delete()
-        } catch (_: IOException) {
-        }
+        RecordingStorage.publish(this, wavFile, schedule)
     }
 
     private fun prefs() = getSharedPreferences(PREFS, MODE_PRIVATE)
 
     private data class FrameStats(val dbFs: Double, val zeroCrossingRate: Double)
 
-    private class WavSink(
+    internal class WavSink(
         private val file: File,
         private val sampleRate: Int,
     ) {
         private val output = RandomAccessFile(file, "rw")
+        private val lock = output.channel.lock()
         private var pcmBytes = 0L
         private var closed = false
 
         init {
-            writeHeader(0)
+            try {
+                writeHeader(0)
+            } catch (error: Exception) {
+                output.close()
+                throw error
+            }
         }
 
         fun write(samples: ShortArray, length: Int) {
@@ -446,10 +427,14 @@ class RecorderService : Service() {
 
         fun closeAndGetFile(): File {
             if (!closed) {
-                output.seek(0)
-                writeHeader(pcmBytes)
-                output.close()
-                closed = true
+                try {
+                    output.seek(0)
+                    writeHeader(pcmBytes)
+                    output.fd.sync()
+                } finally {
+                    closed = true
+                    output.close()
+                }
             }
             return file
         }
@@ -484,6 +469,8 @@ class RecorderService : Service() {
     }
 
     companion object {
+        private val activeService = AtomicReference<Any?>()
+        val isRunning: Boolean get() = activeService.get() != null
         const val ACTION_START = "pl.lisu188.speechrecorder.START"
         const val ACTION_STOP = "pl.lisu188.speechrecorder.STOP"
         const val ACTION_LEVEL = "pl.lisu188.speechrecorder.LEVEL"

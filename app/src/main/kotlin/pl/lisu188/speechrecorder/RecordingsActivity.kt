@@ -2,6 +2,9 @@ package pl.lisu188.speechrecorder
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.content.ContentUris
 import android.content.Intent
 import android.database.Cursor
@@ -11,6 +14,8 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.text.Editable
 import android.text.TextWatcher
@@ -26,6 +31,7 @@ import android.widget.ListView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import java.io.FileInputStream
 import java.text.DateFormat
 import java.util.Date
@@ -49,6 +55,15 @@ class RecordingsActivity : Activity() {
     private val loadExecutor = Executors.newSingleThreadExecutor()
     private var loadTask: Future<*>? = null
     private var loadGeneration = 0
+    private var libraryReceiverRegistered = false
+    private val refreshHandler = Handler(Looper.getMainLooper())
+    private val refreshTask = Runnable { if (!isDestroyed && libraryReceiverRegistered) loadRecordings() }
+    private val libraryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            refreshHandler.removeCallbacks(refreshTask)
+            refreshHandler.postDelayed(refreshTask, 300L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,10 +72,25 @@ class RecordingsActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (!libraryReceiverRegistered) {
+            ContextCompat.registerReceiver(this, libraryReceiver,
+                IntentFilter(RecordingStorage.ACTION_LIBRARY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+            libraryReceiverRegistered = true
+        }
         if (::adapter.isInitialized) loadRecordings()
     }
 
+    override fun onPause() {
+        if (libraryReceiverRegistered) {
+            unregisterReceiver(libraryReceiver)
+            libraryReceiverRegistered = false
+        }
+        refreshHandler.removeCallbacks(refreshTask)
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        refreshHandler.removeCallbacks(refreshTask)
         loadGeneration++
         loadTask?.cancel(true)
         loadExecutor.shutdownNow()
@@ -176,7 +206,7 @@ class RecordingsActivity : Activity() {
         return contentResolver.query(
                 collection,
                 projection,
-                "${MediaStore.Audio.Media.RELATIVE_PATH}=?",
+                "${MediaStore.Audio.Media.RELATIVE_PATH}=? AND ${MediaStore.Audio.Media.IS_PENDING}=0",
                 arrayOf(TranscriptStore.RELATIVE_PATH_QUERY),
                 null,
             )?.use { cursor -> readRecordings(cursor, collection, documents) }.orEmpty()

@@ -61,6 +61,7 @@ class TranscriptionWorker(
                 transcript = transcript,
             )
             checkpoint.clear()
+            RecordingStorage.libraryChanged(applicationContext)
             Result.success(
                 Data.Builder()
                     .putString(OUTPUT_AUDIO_NAME, pair.audioName)
