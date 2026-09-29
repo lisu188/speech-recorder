@@ -7,7 +7,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipInputStream
+import kotlin.concurrent.thread
 
 class LiveArchiveStorageTest {
     @Test fun livePartNamesAreDeterministicAndReversible() {
@@ -29,6 +33,13 @@ class LiveArchiveStorageTest {
             marker,
         )
         assertFalse(marker.startsWith(RecordingStorage.livePrefix(full)))
+    }
+
+    @Test fun partialOrUnknownRemoteSizeNeverCountsAsVerified() {
+        assertFalse(RecordingStorage.remoteSizeMatches(65_536L, null))
+        assertFalse(RecordingStorage.remoteSizeMatches(65_536L, 0L))
+        assertFalse(RecordingStorage.remoteSizeMatches(65_536L, 32_768L))
+        assertTrue(RecordingStorage.remoteSizeMatches(65_536L, 65_536L))
     }
 
     @Test fun archivePolicyUsesThirtyDayCutoff() {
@@ -61,6 +72,52 @@ class LiveArchiveStorageTest {
         val constraints = RecordingStorage.archiveConstraints()
         assertTrue(constraints.requiresCharging())
         assertFalse(constraints.requiresDeviceIdle())
+    }
+
+    @Test fun archiveCriticalSectionIsSerialized() {
+        val firstEntered = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val secondStarted = CountDownLatch(1)
+        val done = CountDownLatch(2)
+        val active = AtomicInteger(0)
+        val maximum = AtomicInteger(0)
+
+        val first = thread(start = true, name = "archive-lock-1") {
+            try {
+                RecordingStorage.withArchiveLock {
+                    val current = active.incrementAndGet()
+                    maximum.updateAndGet { maxOf(it, current) }
+                    firstEntered.countDown()
+                    assertTrue(releaseFirst.await(2, TimeUnit.SECONDS))
+                    active.decrementAndGet()
+                }
+            } finally {
+                done.countDown()
+            }
+        }
+
+        assertTrue(firstEntered.await(2, TimeUnit.SECONDS))
+        val second = thread(start = true, name = "archive-lock-2") {
+            try {
+                secondStarted.countDown()
+                RecordingStorage.withArchiveLock {
+                    val current = active.incrementAndGet()
+                    maximum.updateAndGet { maxOf(it, current) }
+                    active.decrementAndGet()
+                }
+            } finally {
+                done.countDown()
+            }
+        }
+
+        assertTrue(secondStarted.await(2, TimeUnit.SECONDS))
+        Thread.sleep(50L)
+        assertEquals(1, maximum.get())
+        releaseFirst.countDown()
+        assertTrue(done.await(2, TimeUnit.SECONDS))
+        first.join(1000L)
+        second.join(1000L)
+        assertEquals(1, maximum.get())
     }
 
     @Test fun archiveCompressionIsLossless() {
