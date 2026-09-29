@@ -2,7 +2,7 @@
 
 Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VAD działają lokalnie jako foreground service. Zakończone klipy są zapisywane do folderu wybranego w OneDrive przez systemowy Storage Access Framework.
 
-## Wersja 1.5.0
+## Wersja 1.5.1
 
 - Kotlin 2.4.10
 - Android Gradle Plugin 9.3.2
@@ -47,15 +47,15 @@ Na Androidzie 13 i nowszym oznacza to, że informacja o usłudze nie jest wyświ
 
 Na Androidzie 12 i starszym system nadal może wyświetlać wymagane powiadomienie foreground service. Tego nie można legalnie usunąć bez rezygnacji z ciągłego dostępu do mikrofonu w tle.
 
-Kanał techniczny jest cichy, bez dźwięku, wibracji i badge'a.
+Kanał techniczny ma `IMPORTANCE_MIN` i jest całkowicie cichy: bez dźwięku, wibracji i badge’a.
 
 ## Restart telefonu
 
-Nowe wersje Androida ograniczają automatyczne uruchamianie mikrofonowego foreground service po restarcie. Wersja 1.5.0 nie publikuje osobnego powiadomienia z prośbą o wznowienie. Po restarcie należy otworzyć Dyktafon i wybrać **ROZPOCZNIJ**.
+Nowe wersje Androida ograniczają automatyczne uruchamianie mikrofonowego foreground service po restarcie. Wersja 1.5.1 nie publikuje osobnego powiadomienia z prośbą o wznowienie. Po restarcie należy otworzyć Dyktafon i wybrać **ROZPOCZNIJ**.
 
 ## Prywatność
 
-Wersja 1.5.0 nie zawiera integracji OpenAI. Usunięto:
+Wersja 1.5.1 nie zawiera integracji OpenAI. Usunięto:
 
 - klienta OpenAI,
 - przechowywanie klucza API,
