@@ -354,6 +354,9 @@ object RecordingStorage {
                         throw IOException("OneDrive live write failed")
                     }
                 }
+                if (CloudFolderAccess.exists(context, finalName)) {
+                    CloudFolderAccess.deleteByPrefix(context, livePrefix(finalName))
+                }
             }
             if (!file.delete()) throw IOException("Unable to remove uploaded live part")
             true
