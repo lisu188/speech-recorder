@@ -1,0 +1,182 @@
+package pl.lisu188.speechrecorder
+
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.DocumentsContract
+import java.io.IOException
+
+object CloudFolderAccess {
+    private const val PREFS = "storage_settings"
+    private const val KEY_TREE_URI = "recording_tree_uri"
+
+    data class DocumentInfo(
+        val uri: Uri,
+        val name: String,
+        val sizeBytes: Long,
+        val lastModifiedMs: Long,
+    )
+
+    fun load(context: Context): Uri? {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_TREE_URI, null)
+            ?: return null
+        val uri = Uri.parse(raw)
+        val granted = context.contentResolver.persistedUriPermissions.any { permission ->
+            permission.uri == uri && permission.isReadPermission && permission.isWritePermission
+        }
+        if (!granted) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_TREE_URI).apply()
+            return null
+        }
+        return uri
+    }
+
+    fun hasAccess(context: Context): Boolean = load(context) != null
+
+    fun save(context: Context, uri: Uri, flags: Int): Boolean {
+        if (!DocumentsContract.isTreeUri(uri)) return false
+        val requested = flags and (
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        )
+        if (requested and Intent.FLAG_GRANT_WRITE_URI_PERMISSION == 0) return false
+
+        val old = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_TREE_URI, null)
+            ?.let(Uri::parse)
+        return try {
+            context.contentResolver.takePersistableUriPermission(uri, requested)
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_TREE_URI, uri.toString())
+                .apply()
+            if (old != null && old != uri) release(context, old)
+            true
+        } catch (_: SecurityException) {
+            false
+        }
+    }
+
+    fun clear(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs.getString(KEY_TREE_URI, null)?.let(Uri::parse)?.let { release(context, it) }
+        prefs.edit().remove(KEY_TREE_URI).apply()
+    }
+
+    fun displayPath(context: Context): String {
+        val tree = load(context) ?: return "Nie wybrano"
+        val root = rootDocumentUri(tree)
+        return try {
+            context.contentResolver.query(
+                root,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }?.takeIf { it.isNotBlank() } ?: "Wybrany folder OneDrive"
+        } catch (_: Exception) {
+            "Wybrany folder OneDrive"
+        }
+    }
+
+    fun listAudio(context: Context): List<DocumentInfo> {
+        val tree = load(context) ?: return emptyList()
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(
+            tree,
+            DocumentsContract.getTreeDocumentId(tree),
+        )
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        )
+        return context.contentResolver.query(children, projection, null, null, null)?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            val sizeColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+            val modifiedColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            val mimeColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+            buildList {
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(nameColumn) ?: continue
+                    val mime = cursor.getString(mimeColumn).orEmpty()
+                    if (!name.endsWith(".wav", ignoreCase = true) && mime != "audio/wav" && mime != "audio/x-wav") {
+                        continue
+                    }
+                    add(
+                        DocumentInfo(
+                            uri = DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(idColumn)),
+                            name = name,
+                            sizeBytes = if (cursor.isNull(sizeColumn)) 0L else cursor.getLong(sizeColumn),
+                            lastModifiedMs = if (cursor.isNull(modifiedColumn)) 0L else cursor.getLong(modifiedColumn),
+                        ),
+                    )
+                }
+            }
+        }.orEmpty()
+    }
+
+    fun openOrCreateAudio(context: Context, name: String): Uri {
+        val tree = load(context) ?: throw IOException("OneDrive folder is not configured")
+        findChild(context, tree, name)?.let { return it }
+        val root = rootDocumentUri(tree)
+        return DocumentsContract.createDocument(
+            context.contentResolver,
+            root,
+            "audio/wav",
+            name,
+        ) ?: throw IOException("OneDrive provider refused to create the recording")
+    }
+
+    fun delete(context: Context, uri: Uri): Boolean =
+        try {
+            DocumentsContract.deleteDocument(context.contentResolver, uri)
+        } catch (_: Exception) {
+            false
+        }
+
+    private fun findChild(context: Context, tree: Uri, name: String): Uri? {
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(
+            tree,
+            DocumentsContract.getTreeDocumentId(tree),
+        )
+        context.contentResolver.query(
+            children,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            ),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameColumn).equals(name, ignoreCase = true)) {
+                    return DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(idColumn))
+                }
+            }
+        }
+        return null
+    }
+
+    private fun rootDocumentUri(tree: Uri): Uri = DocumentsContract.buildDocumentUriUsingTree(
+        tree,
+        DocumentsContract.getTreeDocumentId(tree),
+    )
+
+    private fun release(context: Context, uri: Uri) {
+        try {
+            context.contentResolver.releasePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        } catch (_: SecurityException) {
+        }
+    }
+}

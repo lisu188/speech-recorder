@@ -10,8 +10,8 @@ android {
         applicationId = "pl.lisu188.speechrecorder"
         minSdk = 29
         targetSdk = 37
-        versionCode = 8
-        versionName = "1.4.2"
+        versionCode = 9
+        versionName = "1.5.0"
     }
 
     compileOptions {
@@ -30,7 +30,7 @@ android {
             initWith(getByName("release"))
             applicationIdSuffix = ".stable"
             matchingFallbacks += "release"
-            manifestPlaceholders["appLabel"] = "Dyktafon 1.4"
+            manifestPlaceholders["appLabel"] = "Dyktafon 1.5"
         }
     }
 
@@ -40,7 +40,6 @@ android {
 dependencies {
     implementation("androidx.work:work-runtime:2.11.2")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.work:work-testing:2.11.2")
 }

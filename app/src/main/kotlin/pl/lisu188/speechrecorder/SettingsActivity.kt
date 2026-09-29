@@ -7,78 +7,58 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
-import android.text.InputType
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.Observer
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
 
 class SettingsActivity : Activity() {
-    private lateinit var apiKeyInput: EditText
-    private lateinit var autoTranscribe: Switch
-    private lateinit var keyStatus: TextView
     private lateinit var folderStatus: TextView
-    private lateinit var deleteKeyButton: Button
     private lateinit var revokeFolderButton: Button
-    private lateinit var queueStatus: TextView
-    private var workStatus: LiveData<List<WorkInfo>>? = null
-    private val workObserver = Observer<List<WorkInfo>> { jobs ->
-        val pending = jobs.count { !it.state.isFinished }
-        val failures = jobs.filter { it.state == WorkInfo.State.FAILED }
-        queueStatus.text = buildString {
-            append("W kolejce lub w trakcie: $pending. Błędy: ${failures.size}.")
-            failures.firstOrNull()?.outputData?.getString(TranscriptionWorker.OUTPUT_ERROR)?.let {
-                append("\n$it")
-            }
-            if (failures.isNotEmpty()) append("\nPo usunięciu przyczyny wybierz transkrypcję brakujących nagrań.")
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
-        workStatus = WorkManager.getInstance(this).getWorkInfosByTagLiveData(TranscriptionScheduler.TAG).also {
-            it.observeForever(workObserver)
-        }
-    }
-
-    override fun onDestroy() {
-        workStatus?.removeObserver(workObserver)
-        super.onDestroy()
     }
 
     override fun onResume() {
         super.onResume()
-        if (::keyStatus.isInitialized) refreshState()
+        if (::folderStatus.isInitialized) refreshState()
     }
 
     @Deprecated("Deprecated in Android API, retained for minSdk-compatible folder selection")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_TRANSCRIPT_FOLDER || resultCode != RESULT_OK) return
+        if (requestCode != REQUEST_ONEDRIVE_FOLDER || resultCode != RESULT_OK) return
 
         val uri = data?.data ?: return
-        if (!TranscriptFolderAccess.save(this, uri, data.flags)) {
+        if (!CloudFolderAccess.save(this, uri, data.flags)) {
             Toast.makeText(
                 this,
-                "Wybierz dokładnie Pamięć wewnętrzna/Music/SpeechRecorder",
+                "Nie udało się zachować dostępu do wybranego folderu. Wybierz folder z prawem zapisu.",
                 Toast.LENGTH_LONG,
             ).show()
             return
         }
 
         refreshState()
-        if (TranscriptionScheduler.canTranscribe(this)) {
-            TranscriptionScheduler.enqueueMissing(this)
-        }
-        Toast.makeText(this, "Folder transkrypcji zapisany", Toast.LENGTH_SHORT).show()
+        RecordingStorage.migrateMediaStore(this)
+        RecordingStorage.recover(this)
+
+        val authority = uri.authority.orEmpty().lowercase()
+        val looksLikeOneDrive = authority.contains("microsoft") ||
+            authority.contains("skydrive") ||
+            authority.contains("onedrive")
+        Toast.makeText(
+            this,
+            if (looksLikeOneDrive) {
+                "Folder OneDrive zapisany. Oczekujące nagrania zostaną wysłane."
+            } else {
+                "Folder zapisany. Upewnij się, że wybrałeś go z sekcji OneDrive w selektorze Androida."
+            },
+            Toast.LENGTH_LONG,
+        ).show()
     }
 
     private fun buildUi(): LinearLayout {
@@ -96,7 +76,7 @@ class SettingsActivity : Activity() {
 
         content.addView(textView("Ustawienia", 30, Color.WHITE, true), matchWrap())
         content.addView(
-            textView("Działanie w tle, nagrywanie i transkrypcja", 15, Color.LTGRAY).apply {
+            textView("Nagrywanie w tle i zapis do OneDrive", 15, Color.LTGRAY).apply {
                 setPadding(0, dp(6), 0, dp(22))
             },
             matchWrap(),
@@ -105,101 +85,62 @@ class SettingsActivity : Activity() {
         addSection(
             content,
             "Nagrywanie",
-            "5 s bufora przed wykrytą mową\n8 s ciszy kończy klip\nWAV 16 kHz mono\nNagrania: Music/SpeechRecorder",
+            "5 s bufora przed wykrytą mową\n8 s ciszy kończy klip\nWAV 16 kHz mono\nAudio jest wykrywane i zapisywane lokalnie bez usług AI.",
         )
+
         addSection(
             content,
             "Działanie w tle",
-            "Foreground service pozostaje aktywny po zamknięciu ekranu aplikacji. Android może nadal zatrzymać usługę po Force stop, odebraniu uprawnień lub przez ograniczenia systemowe.",
+            "Ciągły dostęp do mikrofonu wymaga foreground service. Na Androidzie 13+ aplikacja nie prosi o zgodę na zwykłe powiadomienia, więc komunikat usługi nie jest pokazywany w panelu powiadomień; Android nadal pokazuje aktywną usługę w systemowym widoku aktywnych aplikacji. Na starszych wersjach Androida stałe powiadomienie usługi może być widoczne.",
         )
 
         content.addView(
-            textView("Transkrypcja OpenAI", 18, Color.WHITE, true),
+            textView("OneDrive", 18, Color.WHITE, true),
             matchWrap().apply { topMargin = dp(12) },
         )
-        keyStatus = textView("", 14, Color.LTGRAY).apply {
-            setPadding(0, dp(6), 0, dp(6))
-        }
-        content.addView(keyStatus, matchWrap())
-
-        apiKeyInput = EditText(this).apply {
-            hint = "Klucz OpenAI API (sk-...)"
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-        }
-        content.addView(apiKeyInput, matchWrap())
-
         folderStatus = textView("", 14, Color.LTGRAY).apply {
-            setPadding(0, dp(12), 0, dp(4))
+            setPadding(0, dp(6), 0, dp(8))
         }
         content.addView(folderStatus, matchWrap())
 
         content.addView(
             Button(this).apply {
-                text = "WYBIERZ FOLDER MUSIC/SPEECHRECORDER"
-                setOnClickListener { requestTranscriptFolder() }
+                text = "WYBIERZ FOLDER W ONEDRIVE"
+                setOnClickListener { requestOneDriveFolder() }
             },
-            matchWrap().apply { topMargin = dp(4) },
+            matchWrap(),
         )
 
         revokeFolderButton = Button(this).apply {
             text = "USUŃ DOSTĘP DO FOLDERU"
             setOnClickListener {
-                TranscriptFolderAccess.clear(this@SettingsActivity)
-                TranscriptionScheduler.cancelPending(this@SettingsActivity)
+                CloudFolderAccess.clear(this@SettingsActivity)
                 refreshState()
-                Toast.makeText(this@SettingsActivity, "Dostęp do folderu usunięty", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this@SettingsActivity,
+                    "Dostęp usunięty. Niezapisane nagrania pozostaną bezpiecznie na telefonie.",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
         content.addView(revokeFolderButton, matchWrap().apply { topMargin = dp(6) })
 
-        autoTranscribe = Switch(this).apply {
-            text = "Automatycznie transkrybuj nowe nagrania"
-            setTextColor(Color.WHITE)
-            isChecked = TranscriptionSettings.autoTranscribe(this@SettingsActivity)
-        }
-        content.addView(autoTranscribe, matchWrap().apply { topMargin = dp(8) })
-        queueStatus = textView("Sprawdzanie kolejki transkrypcji…", 14, Color.LTGRAY)
-        content.addView(queueStatus, matchWrap().apply { topMargin = dp(8) })
-
-        content.addView(
-            Button(this).apply {
-                text = "ZAPISZ USTAWIENIA TRANSKRYPCJI"
-                setOnClickListener { saveTranscriptionSettings() }
-            },
-            matchWrap().apply { topMargin = dp(8) },
+        addSection(
+            content,
+            "Jak działa zapis",
+            "Wybierz w systemowym selektorze folder w OneDrive, np. SpeechRecorder. Zakończone nagranie jest najpierw domykane w prywatnym katalogu aplikacji, następnie kopiowane przez systemowy provider OneDrive. Lokalna kopia jest usuwana dopiero po poprawnym zapisie. Po utracie dostępu lub błędzie providera WorkManager ponawia operację.",
         )
-
-        content.addView(
-            Button(this).apply {
-                text = "TRANSKRYBUJ BRAKUJĄCE NAGRANIA"
-                setOnClickListener { enqueueMissing() }
-            },
-            matchWrap().apply { topMargin = dp(8) },
-        )
-
-        deleteKeyButton = Button(this).apply {
-            text = "USUŃ KLUCZ OPENAI"
-            setOnClickListener {
-                OpenAiKeyStore.delete(this@SettingsActivity)
-                TranscriptionScheduler.cancelPending(this@SettingsActivity)
-                refreshState()
-                Toast.makeText(this@SettingsActivity, "Klucz OpenAI usunięty", Toast.LENGTH_SHORT).show()
-            }
-        }
-        content.addView(deleteKeyButton, matchWrap().apply { topMargin = dp(8) })
 
         addSection(
             content,
-            "Pliki po transkrypcji",
-            "Po zakończeniu transkrypcji aplikacja nadaje WAV krótką nazwę opisującą rozmowę i zapisuje obok plik TXT o identycznej nazwie bazowej. TXT zawiera podsumowanie oraz pełną transkrypcję. Android wymaga jednorazowego wskazania folderu Music/SpeechRecorder, aby aplikacja mogła zapisywać w nim pliki tekstowe.",
+            "Migracja",
+            "Po wybraniu folderu aplikacja przeniesie istniejące pliki WAV z wcześniejszego Music/SpeechRecorder do wybranego folderu. Plik źródłowy jest kasowany dopiero po poprawnym skopiowaniu.",
         )
+
         addSection(
             content,
             "Prywatność",
-            "Nagrywanie i wykrywanie mowy działają lokalnie. Audio jest wysyłane do OpenAI dopiero po zakończeniu klipu, gdy automatyczna transkrypcja jest włączona, zapisano klucz API i przyznano dostęp do folderu. Klucz API jest szyfrowany przy użyciu Android Keystore i nie jest zapisany w repozytorium.",
+            "Integracja z OpenAI została usunięta. Aplikacja nie posiada klucza API, nie wykonuje transkrypcji i nie ma własnego uprawnienia INTERNET. Dostęp do OneDrive jest realizowany przez systemowy Storage Access Framework i provider OneDrive zainstalowany na urządzeniu.",
         )
 
         content.addView(
@@ -231,7 +172,7 @@ class SettingsActivity : Activity() {
         return page
     }
 
-    private fun requestTranscriptFolder() {
+    private fun requestOneDriveFolder() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
@@ -239,79 +180,15 @@ class SettingsActivity : Activity() {
             addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
         }
         @Suppress("DEPRECATION")
-        startActivityForResult(intent, REQUEST_TRANSCRIPT_FOLDER)
-    }
-
-    private fun saveTranscriptionSettings() {
-        val newKey = apiKeyInput.text.toString().trim()
-        if (newKey.isNotEmpty()) {
-            if (!newKey.startsWith("sk-") || newKey.length < 20) {
-                Toast.makeText(this, "Nieprawidłowy format klucza OpenAI API", Toast.LENGTH_LONG).show()
-                return
-            }
-            try {
-                OpenAiKeyStore.save(this, newKey)
-                apiKeyInput.text.clear()
-            } catch (_: Exception) {
-                Toast.makeText(this, "Nie udało się bezpiecznie zapisać klucza", Toast.LENGTH_LONG).show()
-                return
-            }
-        }
-
-        TranscriptionSettings.setAutoTranscribe(this, autoTranscribe.isChecked)
-        when {
-            !autoTranscribe.isChecked -> TranscriptionScheduler.cancelPending(this)
-            TranscriptionScheduler.canTranscribe(this) -> TranscriptionScheduler.enqueueMissing(this)
-        }
-        refreshState()
-
-        if (autoTranscribe.isChecked && !OpenAiKeyStore.hasKey(this)) {
-            Toast.makeText(this, "Ustawienia zapisane. Dodaj klucz OpenAI, aby uruchomić transkrypcję.", Toast.LENGTH_LONG).show()
-        } else if (autoTranscribe.isChecked && !TranscriptFolderAccess.hasAccess(this)) {
-            Toast.makeText(this, "Ustawienia zapisane. Wybierz folder Music/SpeechRecorder.", Toast.LENGTH_LONG).show()
-        } else {
-            Toast.makeText(this, "Ustawienia zapisane", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun enqueueMissing() {
-        when {
-            !OpenAiKeyStore.hasKey(this) ->
-                Toast.makeText(this, "Najpierw zapisz klucz OpenAI API", Toast.LENGTH_LONG).show()
-
-            !TranscriptFolderAccess.hasAccess(this) ->
-                Toast.makeText(this, "Najpierw wybierz folder Music/SpeechRecorder", Toast.LENGTH_LONG).show()
-
-            !TranscriptionSettings.autoTranscribe(this) ->
-                Toast.makeText(this, "Najpierw włącz automatyczną transkrypcję", Toast.LENGTH_LONG).show()
-
-            else -> {
-                TranscriptionScheduler.enqueueMissing(this)
-                Toast.makeText(this, "Dodano brakujące transkrypcje do kolejki", Toast.LENGTH_SHORT).show()
-            }
-        }
+        startActivityForResult(intent, REQUEST_ONEDRIVE_FOLDER)
     }
 
     private fun refreshState() {
-        val hasKey = OpenAiKeyStore.hasKey(this)
-        val hasFolder = TranscriptFolderAccess.hasAccess(this)
-
-        keyStatus.text = if (hasKey) {
-            "Klucz OpenAI jest zapisany bezpiecznie na tym urządzeniu."
-        } else {
-            "Brak klucza OpenAI — transkrypcja nie będzie wysyłana."
-        }
-        apiKeyInput.hint = if (hasKey) {
-            "Wpisz nowy klucz, aby zastąpić zapisany"
-        } else {
-            "Klucz OpenAI API (sk-...)"
-        }
-        deleteKeyButton.isEnabled = hasKey
-
+        val hasFolder = CloudFolderAccess.hasAccess(this)
         folderStatus.text = if (hasFolder) {
-            "Folder transkrypcji: ${TranscriptFolderAccess.displayPath(this)}"
+            "Folder zapisu: ${CloudFolderAccess.displayPath(this)}"
         } else {
-            "Folder transkrypcji: nie wybrano"
+            "Folder zapisu: nie wybrano. Nagrywanie wymaga jednorazowego wskazania folderu OneDrive."
         }
         revokeFolderButton.isEnabled = hasFolder
     }
@@ -345,6 +222,6 @@ class SettingsActivity : Activity() {
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     private companion object {
-        const val REQUEST_TRANSCRIPT_FOLDER = 7301
+        const val REQUEST_ONEDRIVE_FOLDER = 7301
     }
 }

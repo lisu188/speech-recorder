@@ -1,17 +1,11 @@
 package pl.lisu188.speechrecorder
 
-import android.content.ContentResolver
 import android.content.ContentUris
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.database.Cursor
 import android.net.Uri
-import android.os.Build
-import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.AtomicFile
 import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.Data
@@ -23,6 +17,7 @@ import androidx.work.WorkerParameters
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.io.RandomAccessFile
 import java.nio.channels.OverlappingFileLockException
 import java.text.SimpleDateFormat
@@ -35,8 +30,17 @@ import java.util.concurrent.TimeUnit
 object RecordingStorage {
     const val ACTION_LIBRARY_CHANGED = "pl.lisu188.speechrecorder.LIBRARY_CHANGED"
     const val INPUT_FILE = "recording_file"
+    private const val LEGACY_RELATIVE_PATH = "Music/SpeechRecorder/"
     private val recoveryExecutor = Executors.newSingleThreadExecutor()
+    private val migrationExecutor = Executors.newSingleThreadExecutor()
     private val recoveryLock = Any()
+
+    data class StoredRecording(
+        val uri: Uri,
+        val name: String,
+        val sizeBytes: Long,
+        val lastModifiedMs: Long,
+    )
 
     fun directory(context: Context): File = File(context.noBackupFilesDir, "recordings").also {
         if (!it.isDirectory && !it.mkdirs()) throw IOException("Unable to create recording storage")
@@ -52,13 +56,15 @@ object RecordingStorage {
             val work = OneTimeWorkRequestBuilder<RecordingPublishWorker>()
                 .setInputData(Data.Builder().putString(INPUT_FILE, file.name).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-                .addTag("speech-recorder-publication")
+                .addTag("speech-recorder-onedrive")
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
-                "publish_${file.name}", ExistingWorkPolicy.KEEP, work,
+                "onedrive_${file.name}",
+                ExistingWorkPolicy.REPLACE,
+                work,
             )
         } catch (_: Exception) {
-            reportError(context, "Nagranie zachowano lokalnie. Otwórz aplikację ponownie, aby wznowić zapis.")
+            reportError(context, "Nagranie zachowano lokalnie. Otwórz aplikację, aby ponowić zapis do OneDrive.")
         }
     }
 
@@ -68,14 +74,68 @@ object RecordingStorage {
             synchronized(recoveryLock) {
                 try {
                     migrateLegacy(app)
-                    directory(app).listFiles().orEmpty()
-                        .filter { it.isFile && it.name.endsWith(".wav") }
-                        .forEach { enqueue(app, it) }
+                    val pending = directory(app).listFiles().orEmpty()
+                        .filter { it.isFile && it.name.endsWith(".wav", ignoreCase = true) }
+                    if (pending.isNotEmpty() && !CloudFolderAccess.hasAccess(app)) {
+                        reportError(app, "Nagrania czekają lokalnie. Wybierz folder OneDrive w Ustawieniach.")
+                        return@synchronized
+                    }
+                    pending.forEach { enqueue(app, it) }
                 } catch (_: Exception) {
-                    reportError(app, "Nie udało się wznowić zapisu nagrań. Sprawdź wolne miejsce na telefonie.")
+                    reportError(app, "Nie udało się wznowić zapisu nagrań. Sprawdź pamięć telefonu i dostęp do OneDrive.")
                 }
             }
         }
+    }
+
+    fun migrateMediaStore(context: Context) {
+        val app = context.applicationContext
+        migrationExecutor.execute {
+            if (!CloudFolderAccess.hasAccess(app)) return@execute
+            val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.SIZE,
+            )
+            try {
+                app.contentResolver.query(
+                    collection,
+                    projection,
+                    "${MediaStore.Audio.Media.RELATIVE_PATH}=? AND ${MediaStore.Audio.Media.IS_PENDING}=0",
+                    arrayOf(LEGACY_RELATIVE_PATH),
+                    null,
+                )?.use { cursor ->
+                    val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                    val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                    val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
+                    while (cursor.moveToNext()) {
+                        val name = cursor.getString(nameColumn) ?: continue
+                        if (!name.endsWith(".wav", ignoreCase = true)) continue
+                        val source = ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
+                        val expectedSize = cursor.getLong(sizeColumn)
+                        val copied = app.contentResolver.openInputStream(source)?.use { input ->
+                            copyToCloud(app, name, input, expectedSize)
+                        } ?: false
+                        if (copied) app.contentResolver.delete(source, null, null)
+                    }
+                }
+                libraryChanged(app)
+            } catch (_: Exception) {
+                reportError(app, "Nie udało się przenieść części starszych nagrań do OneDrive.")
+            }
+        }
+    }
+
+    fun listPublished(context: Context): List<StoredRecording> =
+        CloudFolderAccess.listAudio(context).map {
+            StoredRecording(it.uri, it.name, it.sizeBytes, it.lastModifiedMs)
+        }
+
+    fun deletePublished(context: Context, uri: Uri): Boolean {
+        val deleted = CloudFolderAccess.delete(context, uri)
+        if (deleted) libraryChanged(context)
+        return deleted
     }
 
     internal fun migrateLegacy(context: Context) {
@@ -133,109 +193,46 @@ object RecordingStorage {
         return dataSize
     }
 
-    internal fun publish(
-        context: Context,
-        wavFile: File,
-        schedule: (Uri) -> Unit = { TranscriptionScheduler.enqueue(context, it); Unit },
-    ): Boolean {
+    internal fun publish(context: Context, wavFile: File): Boolean {
         if (!wavFile.exists()) return true
         if (wavFile.length() <= 44L) return wavFile.delete()
-        val resolver = context.contentResolver
-        val receipt = AtomicFile(File(wavFile.parentFile, "${wavFile.name}.media"))
-        var uri: Uri? = null
-        var published = false
-        try {
-            val recordedUri = try {
-                Uri.parse(receipt.openRead().bufferedReader().use { it.readText() })
-            } catch (_: IOException) { null }
-            uri = recordedUri?.takeIf {
-                it.scheme == "content" && it.authority == "media" && publicationState(context, it) != null
-            }
-                ?: findPendingPublication(context, wavFile.name)
-            if (uri == null) {
-                uri = resolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
-                    put(MediaStore.Audio.Media.DISPLAY_NAME, wavFile.name)
-                    put(MediaStore.Audio.Media.MIME_TYPE, "audio/wav")
-                    put(MediaStore.Audio.Media.RELATIVE_PATH, TranscriptStore.RELATIVE_PATH)
-                    put(MediaStore.Audio.Media.IS_PENDING, 1)
-                }) ?: throw IOException("MediaStore insert failed")
-            }
-            val destination = uri
-            val pending = receipt.startWrite()
-            try {
-                pending.write(destination.toString().toByteArray(Charsets.UTF_8))
-                receipt.finishWrite(pending)
-            } catch (error: Exception) {
-                receipt.failWrite(pending)
-                throw error
-            }
-            published = publicationState(context, destination) == false
-            if (!published) {
-                val stream = resolver.openOutputStream(destination, "wt")
-                    ?: throw IOException("MediaStore output stream unavailable")
-                stream.buffered().use { output -> wavFile.inputStream().use { it.copyTo(output, 32768) } }
-                val changed = resolver.update(destination, ContentValues().apply {
-                    put(MediaStore.Audio.Media.DURATION, (wavFile.length() - 44L) * 1000L / 32000L)
-                    put(MediaStore.Audio.Media.IS_PENDING, 0)
-                }, null, null)
-                if (changed <= 0) throw IOException("MediaStore publication failed")
-                published = true
-            }
-            try {
-                schedule(destination)
-            } catch (_: Exception) {
-                Log.w("SpeechRecorder", "Recording saved; transcription could not be queued")
-            }
-            if (wavFile.delete()) receipt.delete()
-            if (directory(context).listFiles().orEmpty().none { it.name.endsWith(".wav") }) {
-                context.getSharedPreferences("recorder", Context.MODE_PRIVATE).edit().remove("storage_error").apply()
-            }
-            libraryChanged(context)
-            return !wavFile.exists()
-        } catch (_: Exception) {
-            if (!published) {
-                try {
-                    if (uri != null && resolver.delete(uri, null, null) > 0) receipt.delete()
-                } catch (_: Exception) {
-                }
-            }
-            reportError(context, "Nagranie zachowano lokalnie. Zapis zostanie ponowiony; sprawdź wolne miejsce.")
+        if (!CloudFolderAccess.hasAccess(context)) {
+            reportError(context, "Nagranie zachowano lokalnie. Wybierz folder OneDrive w Ustawieniach.")
             return false
         }
-    }
 
-    private fun publicationState(context: Context, uri: Uri): Boolean? {
-        queryIncludingPending(context, uri, arrayOf(MediaStore.Audio.Media.IS_PENDING))?.use {
-            if (it.moveToFirst()) return it.getInt(0) != 0
+        return try {
+            val expectedSize = wavFile.length()
+            wavFile.inputStream().use { input ->
+                if (!copyToCloud(context, wavFile.name, input, expectedSize)) {
+                    throw IOException("OneDrive write failed")
+                }
+            }
+            if (!wavFile.delete()) throw IOException("Unable to remove local staging file")
+            clearStorageErrorIfEmpty(context)
+            libraryChanged(context)
+            true
+        } catch (_: Exception) {
+            reportError(context, "Nagranie zachowano lokalnie. Zapis do OneDrive zostanie ponowiony.")
+            false
         }
-        return null
     }
 
-    private fun findPendingPublication(context: Context, name: String): Uri? {
-        val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-        queryIncludingPending(
-            context, collection, arrayOf(MediaStore.Audio.Media._ID),
-            "${MediaStore.Audio.Media.RELATIVE_PATH}=? AND ${MediaStore.Audio.Media.DISPLAY_NAME}=?",
-            arrayOf(TranscriptStore.RELATIVE_PATH_QUERY, name),
-        )?.use { if (it.moveToFirst()) return ContentUris.withAppendedId(collection, it.getLong(0)) }
-        return null
+    private fun copyToCloud(context: Context, name: String, input: InputStream, expectedSize: Long): Boolean {
+        val target = CloudFolderAccess.openOrCreateAudio(context, name)
+        val written = context.contentResolver.openOutputStream(target, "wt")?.buffered()?.use { output ->
+            input.copyTo(output, 32768)
+        } ?: throw IOException("OneDrive output stream unavailable")
+        if (expectedSize > 0L && written != expectedSize) {
+            throw IOException("OneDrive write was incomplete")
+        }
+        return true
     }
 
-    @Suppress("DEPRECATION")
-    private fun queryIncludingPending(
-        context: Context,
-        uri: Uri,
-        projection: Array<String>,
-        selection: String? = null,
-        arguments: Array<String>? = null,
-    ): Cursor? = if (Build.VERSION.SDK_INT >= 30) {
-        context.contentResolver.query(uri, projection, Bundle().apply {
-            putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
-            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
-            putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arguments)
-        }, null)
-    } else {
-        context.contentResolver.query(MediaStore.setIncludePending(uri), projection, selection, arguments, null)
+    private fun clearStorageErrorIfEmpty(context: Context) {
+        if (directory(context).listFiles().orEmpty().none { it.name.endsWith(".wav", ignoreCase = true) }) {
+            context.getSharedPreferences("recorder", Context.MODE_PRIVATE).edit().remove("storage_error").apply()
+        }
     }
 
     fun libraryChanged(context: Context) {
@@ -245,7 +242,8 @@ object RecordingStorage {
     private fun reportError(context: Context, message: String) {
         Log.w("SpeechRecorder", message)
         context.getSharedPreferences("recorder", Context.MODE_PRIVATE).edit()
-            .putString("storage_error", message).apply()
+            .putString("storage_error", message)
+            .apply()
         libraryChanged(context)
     }
 }
@@ -258,7 +256,11 @@ class RecordingPublishWorker(context: Context, parameters: WorkerParameters) : W
             val file = File(RecordingStorage.directory(applicationContext), name)
             if (!file.isFile) return Result.success()
             RandomAccessFile(file, "rw").use { audio ->
-                val lock = try { audio.channel.tryLock() } catch (_: OverlappingFileLockException) { null }
+                val lock = try {
+                    audio.channel.tryLock()
+                } catch (_: OverlappingFileLockException) {
+                    null
+                }
                 if (lock == null) return Result.retry()
                 lock.use {
                     val bytes = RecordingStorage.repairHeader(audio)

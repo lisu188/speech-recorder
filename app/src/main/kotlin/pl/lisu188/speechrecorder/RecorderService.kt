@@ -13,7 +13,6 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.NoiseSuppressor
-import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.Handler
@@ -111,8 +110,6 @@ class RecorderService : Service() {
     private fun updateNotification(speechActive: Boolean) {
         val active = running.get() && prefs().getBoolean("enabled", false) && !destroyed
         prefs().edit().putBoolean("speech_active", speechActive && active).apply()
-        val manager = getSystemService(NotificationManager::class.java)
-        if (active) manager.notify(NOTIFICATION_ID, buildNotification(speechActive))
     }
 
     private fun stopWithError(message: String) {
@@ -132,32 +129,34 @@ class RecorderService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val stopPending = PendingIntent.getService(
-            this,
-            2,
-            Intent(this, RecorderService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mic_notification)
-            .setContentTitle("Dyktafon")
-            .setContentText(if (speechActive) "Wykryto mowę — zapisuję" else "Nasłuchuję — czekam na mowę")
+            .setContentTitle("Dyktafon działa w tle")
+            .setContentText(if (speechActive) "Nagrywanie mowy" else "Nasłuchiwanie mikrofonu")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .setVisibility(Notification.VISIBILITY_SECRET)
             .setContentIntent(openPending)
-            .addAction(0, "ZATRZYMAJ", stopPending)
             .build()
     }
 
     private fun createNotificationChannel() {
-        getSystemService(NotificationManager::class.java).createNotificationChannel(
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
+        manager.deleteNotificationChannel(LEGACY_RESUME_CHANNEL_ID)
+        manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                "Nagrywanie mowy",
+                "Nagrywanie w tle",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Informuje o aktywnym nasłuchiwaniu mikrofonu"
+                description = "Techniczny kanał wymagany przez Android dla dostępu do mikrofonu w tle"
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
             },
         )
     }
@@ -387,10 +386,6 @@ class RecorderService : Service() {
         return FrameStats(dbFs, zeroCrossings / length.toDouble())
     }
 
-    internal fun publish(wavFile: File, schedule: (Uri) -> Unit = { TranscriptionScheduler.enqueue(this, it); Unit }) {
-        RecordingStorage.publish(this, wavFile, schedule)
-    }
-
     private fun prefs() = getSharedPreferences(PREFS, MODE_PRIVATE)
 
     private data class FrameStats(val dbFs: Double, val zeroCrossingRate: Double)
@@ -479,7 +474,9 @@ class RecorderService : Service() {
         const val EXTRA_LAST_SPEECH = "last_speech"
 
         private const val PREFS = "recorder"
-        private const val CHANNEL_ID = "speech_recorder"
+        private const val CHANNEL_ID = "speech_recorder_background"
+        private const val LEGACY_CHANNEL_ID = "speech_recorder"
+        private const val LEGACY_RESUME_CHANNEL_ID = "speech_recorder_resume"
         private const val NOTIFICATION_ID = 41
         private const val SAMPLE_RATE = 16000
         private const val FRAME_MS = 20

@@ -10,7 +10,6 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.widget.Button
@@ -57,7 +56,6 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
         RecordingStorage.recover(this)
-        TranscriptionScheduler.enqueueMissing(this)
         if (intent.action == ACTION_RESUME_AFTER_BOOT) requestAndStart()
     }
 
@@ -143,7 +141,7 @@ class MainActivity : Activity() {
 
         content.addView(
             textView(
-                "Nagrania są zapisywane na telefonie. Opcjonalna transkrypcja w ustawieniach wysyła zakończone klipy do OpenAI.",
+                "Nagrania są buforowane lokalnie i po zakończeniu zapisywane do wybranego folderu OneDrive.",
                 13,
                 Color.GRAY,
             ).apply { setPadding(0, dp(18), 0, dp(8)) },
@@ -195,18 +193,20 @@ class MainActivity : Activity() {
     }
 
     private fun requestAndStart() {
-        val missing = buildList {
-            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                add(Manifest.permission.RECORD_AUDIO)
-            }
-            if (
-                Build.VERSION.SDK_INT >= 33 &&
-                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-            ) {
-                add(Manifest.permission.POST_NOTIFICATIONS)
-            }
+        if (!CloudFolderAccess.hasAccess(this)) {
+            Toast.makeText(
+                this,
+                "Najpierw wybierz folder OneDrive w Ustawieniach.",
+                Toast.LENGTH_LONG,
+            ).show()
+            startActivity(Intent(this, SettingsActivity::class.java))
+            return
         }
-        if (missing.isEmpty()) startRecorder() else requestPermissions(missing.toTypedArray(), REQUEST_PERMISSIONS)
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startRecorder()
+        } else {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_PERMISSIONS)
+        }
     }
 
     override fun onRequestPermissionsResult(
