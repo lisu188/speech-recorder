@@ -20,7 +20,7 @@ Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VA
 - automatyczne wznowienie przy pierwszym otwarciu aplikacji po restarcie telefonu
 - trwały lokalny bufor awaryjny w prywatnym katalogu aplikacji
 - zapis nagrań do wybranego folderu OneDrive
-- podczas aktywnego klipu poprawne 15-sekundowe WAV-y bezpieczeństwa są kolejkowane do OneDrive
+- podczas aktywnego klipu poprawne 15-sekundowe WAV-y bezpieczeństwa są natychmiast przekazywane do providera OneDrive
 - po poprawnym zapisie pełnego WAV techniczne fragmenty live są usuwane
 - WAV-y starsze niż 30 dni są automatycznie kompresowane lossless do `.wav.zip` na OneDrive
 - przeglądarka nagrań czytająca bezpośrednio wybrany folder OneDrive
@@ -40,9 +40,9 @@ Aplikacja zapamiętuje persistowalne uprawnienie do wybranego drzewa dokumentów
 
 ## Bezpieczeństwo zapisu
 
-Aktywny klip jest zapisywany w trwałym prywatnym katalogu aplikacji. Równolegle aplikacja zamyka co 15 sekund poprawny techniczny fragment WAV i kolejkuje go do tego samego folderu OneDrive. Fragmenty mają prefiks `__sr_live_` i są plikami awaryjnymi, a nie pozycjami biblioteki.
+Aktywny klip jest zapisywany w trwałym prywatnym katalogu aplikacji. Równolegle aplikacja zamyka co 15 sekund poprawny techniczny fragment WAV i natychmiast przekazuje go do providera OneDrive w dedykowanej szeregowej kolejce I/O. WorkManager służy jako fallback po błędzie oraz do odzyskiwania plików po restarcie procesu. Fragmenty mają prefiks `__sr_live_` i są plikami awaryjnymi, a nie pozycjami biblioteki.
 
-Po zamknięciu rozmowy WorkManager zapisuje pełny WAV w OneDrive. Dopiero po poprawnym przesłaniu pełnego pliku aplikacja usuwa odpowiadające mu techniczne fragmenty live i lokalną kopię. Dzięki temu awaria urządzenia podczas długiego klipu ogranicza ilość audio, które nie zdążyło jeszcze trafić do kolejki chmurowej.
+Po zamknięciu rozmowy WorkManager zapisuje pełny WAV w OneDrive. Dopiero po poprawnym przesłaniu pełnego pliku aplikacja usuwa odpowiadające mu techniczne fragmenty live i lokalną kopię. Dzięki temu awaria urządzenia podczas długiego klipu ogranicza ilość audio, które aplikacja nie zdążyła jeszcze przekazać providerowi, do około 15 sekund. Faktyczny moment wysłania danych do serwerów Microsoft zależy od synchronizacji providera OneDrive.
 
 Jeżeli OneDrive jest niedostępny, uprawnienie do folderu wygasło albo provider zwróci błąd, lokalna kopia pozostaje na urządzeniu i zapis jest ponawiany. Po ponownym otwarciu aplikacji osierocone nagrania są odzyskiwane, naprawiany jest nagłówek WAV i zadanie jest ponownie kolejkowane.
 
