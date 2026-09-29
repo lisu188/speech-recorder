@@ -103,16 +103,15 @@ object CloudFolderAccess {
                     val name = cursor.getString(nameColumn) ?: continue
                     if (name.startsWith(INTERNAL_PREFIX)) continue
                     val mime = cursor.getString(mimeColumn).orEmpty()
-                    val archived = name.endsWith(".wav.zip", ignoreCase = true)
                     val wav = name.endsWith(".wav", ignoreCase = true) || mime == "audio/wav" || mime == "audio/x-wav"
-                    if (!wav && !archived) continue
+                    if (!wav) continue
                     add(
                         DocumentInfo(
                             uri = DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(idColumn)),
                             name = name,
                             sizeBytes = if (cursor.isNull(sizeColumn)) 0L else cursor.getLong(sizeColumn),
                             lastModifiedMs = if (cursor.isNull(modifiedColumn)) 0L else cursor.getLong(modifiedColumn),
-                            archived = archived,
+                            archived = false,
                         ),
                     )
                 }
