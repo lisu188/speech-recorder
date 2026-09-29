@@ -40,6 +40,8 @@ class RecorderRegressionTest {
         assertFalse("POST_NOTIFICATIONS must stay removed", Manifest.permission.POST_NOTIFICATIONS in requested)
         assertTrue(Manifest.permission.RECORD_AUDIO in requested)
         assertTrue(Manifest.permission.FOREGROUND_SERVICE in requested)
+        assertTrue(Manifest.permission.WAKE_LOCK in requested)
+        assertTrue(Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS in requested)
     }
 
     @Test fun rebootReceiverRequiresManualRestartWithoutPostingNotification() {
