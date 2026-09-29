@@ -243,6 +243,7 @@ class RecorderService : Service() {
     private fun captureLoop() {
         val prebuffer = ArrayDeque<ShortArray>(PREBUFFER_FRAMES + 1)
         var sink: WavSink? = null
+        var liveMirror: LiveMirror? = null
         var silenceFrames = 0
         var consecutiveSpeechFrames = 0
         var clipFrames = 0
@@ -314,8 +315,15 @@ class RecorderService : Service() {
                 }
 
                 if (sink == null && consecutiveSpeechFrames >= SPEECH_FRAMES_TO_START) {
-                    sink = WavSink(RecordingStorage.newFile(this, now - prebuffer.size * FRAME_MS), SAMPLE_RATE)
-                    prebuffer.forEach { sink.write(it, it.size) }
+                    val finalFile = RecordingStorage.newFile(this, now - prebuffer.size * FRAME_MS)
+                    val newSink = WavSink(finalFile, SAMPLE_RATE)
+                    val newMirror = LiveMirror(this, finalFile.name, SAMPLE_RATE)
+                    sink = newSink
+                    liveMirror = newMirror
+                    prebuffer.forEach { buffered ->
+                        newSink.write(buffered, buffered.size)
+                        newMirror.write(buffered, buffered.size)
+                    }
                     clipFrames = prebuffer.size
                     rememberSpeech(now)
                     updateNotification(true)
@@ -325,11 +333,14 @@ class RecorderService : Service() {
 
                 val activeSink = sink ?: continue
                 activeSink.write(frame, read)
+                liveMirror?.write(frame, read)
                 clipFrames++
                 if (silenceFrames >= SILENCE_FRAMES_TO_STOP || clipFrames >= MAX_CLIP_FRAMES) {
                     val completed = activeSink.closeAndGetFile()
+                    liveMirror?.close()
+                    liveMirror = null
                     sink = null
-                    RecordingStorage.enqueue(this, completed)
+                    RecordingStorage.enqueueCompleted(this, completed)
                     silenceFrames = 0
                     consecutiveSpeechFrames = 0
                     clipFrames = 0
@@ -348,7 +359,9 @@ class RecorderService : Service() {
         } finally {
             sink?.let {
                 try {
-                    RecordingStorage.enqueue(this, it.closeAndGetFile())
+                    liveMirror?.close()
+                    liveMirror = null
+                    RecordingStorage.enqueueCompleted(this, it.closeAndGetFile())
                 } catch (_: Exception) {
                 }
             }
@@ -494,6 +507,47 @@ class RecorderService : Service() {
         }
     }
 
+    private class LiveMirror(
+        private val context: android.content.Context,
+        private val finalName: String,
+        private val sampleRate: Int,
+    ) {
+        private var part = 1
+        private var pcmBytes = 0L
+        private var closed = false
+        private var sink = newSink()
+
+        fun write(samples: ShortArray, length: Int) {
+            if (closed) return
+            sink.write(samples, length)
+            pcmBytes += length * 2L
+            if (pcmBytes >= LIVE_PART_SECONDS * sampleRate * 2L) rotate()
+        }
+
+        fun close() {
+            if (closed) return
+            closed = true
+            finishCurrent()
+        }
+
+        private fun rotate() {
+            finishCurrent()
+            part++
+            pcmBytes = 0L
+            sink = newSink()
+        }
+
+        private fun finishCurrent() {
+            val file = sink.closeAndGetFile()
+            if (pcmBytes > 0L) RecordingStorage.enqueueLivePart(context, file) else file.delete()
+        }
+
+        private fun newSink() = WavSink(
+            RecordingStorage.newLivePartFile(context, finalName, part),
+            sampleRate,
+        )
+    }
+
     companion object {
         private val activeService = AtomicReference<Any?>()
         val isRunning: Boolean get() = activeService.get() != null
@@ -518,5 +572,6 @@ class RecorderService : Service() {
         private const val MAX_CLIP_FRAMES = 30 * 60 * 1000 / FRAME_MS
         private const val RESTART_DELAY_MS = 2000L
         private const val LEVEL_BROADCAST_INTERVAL_MS = 200L
+        private const val LIVE_PART_SECONDS = 15L
     }
 }
