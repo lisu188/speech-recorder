@@ -107,7 +107,7 @@ class SettingsActivity : ComponentActivity() {
             if (looksLikeOneDrive) {
                 "Folder OneDrive zapisany."
             } else {
-                "Folder zapisany. Upewnij się, że pochodzi z sekcji OneDrive.",
+                "Folder zapisany. Upewnij się, że pochodzi z sekcji OneDrive."
             },
             Toast.LENGTH_LONG,
         ).show()
