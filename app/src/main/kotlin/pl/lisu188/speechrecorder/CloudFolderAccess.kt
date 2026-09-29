@@ -9,6 +9,12 @@ import java.io.IOException
 object CloudFolderAccess {
     private const val PREFS = "storage_settings"
     private const val KEY_TREE_URI = "recording_tree_uri"
+    private const val INTERNAL_FOLDER_NAME = "__sr_live"
+    private const val INTERNAL_PREFIX = "__sr_"
+    private val cacheLock = Any()
+    private var cachedTree: String? = null
+    private var cachedLiveFolder: Uri? = null
+    private val cachedLiveChildren = mutableMapOf<String, Uri>()
 
     data class DocumentInfo(
         val uri: Uri,
@@ -28,8 +34,10 @@ object CloudFolderAccess {
         }
         if (!granted) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_TREE_URI).apply()
+            invalidateCache()
             return null
         }
+        ensureCacheTree(uri)
         return uri
     }
 
@@ -52,6 +60,8 @@ object CloudFolderAccess {
                 .putString(KEY_TREE_URI, uri.toString())
                 .apply()
             if (old != null && old != uri) release(context, old)
+            invalidateCache()
+            ensureCacheTree(uri)
             true
         } catch (_: SecurityException) {
             false
@@ -62,6 +72,7 @@ object CloudFolderAccess {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs.getString(KEY_TREE_URI, null)?.let(Uri::parse)?.let { release(context, it) }
         prefs.edit().remove(KEY_TREE_URI).apply()
+        invalidateCache()
     }
 
     fun displayPath(context: Context): String {
@@ -84,7 +95,7 @@ object CloudFolderAccess {
 
     fun listAudio(context: Context): List<DocumentInfo> {
         val tree = load(context) ?: return emptyList()
-        val children = childrenUri(tree)
+        val children = childrenUri(tree, rootDocumentUri(tree))
         val projection = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
@@ -124,19 +135,61 @@ object CloudFolderAccess {
 
     fun openOrCreateFile(context: Context, name: String, mimeType: String): Uri {
         val tree = load(context) ?: throw IOException("OneDrive folder is not configured")
-        findChild(context, tree, name)?.let { return it }
+        val root = rootDocumentUri(tree)
+        findChild(context, tree, root, name)?.let { return it }
         return DocumentsContract.createDocument(
             context.contentResolver,
-            rootDocumentUri(tree),
+            root,
             mimeType,
             name,
         ) ?: throw IOException("OneDrive provider refused to create $name")
     }
 
-    fun exists(context: Context, name: String): Boolean {
-        val tree = load(context) ?: return false
-        return findChild(context, tree, name) != null
+    fun openOrCreateLiveFile(context: Context, name: String, mimeType: String): Uri {
+        val tree = load(context) ?: throw IOException("OneDrive folder is not configured")
+        val parent = liveFolder(context, tree)
+        cachedLiveChild(context, name)?.let { return it }
+        findChild(context, tree, parent, name)?.let {
+            cacheLiveChild(name, it)
+            return it
+        }
+        val created = DocumentsContract.createDocument(
+            context.contentResolver,
+            parent,
+            mimeType,
+            name,
+        ) ?: throw IOException("OneDrive provider refused to create live file $name")
+        cacheLiveChild(name, created)
+        return created
     }
+
+    fun liveExists(context: Context, name: String): Boolean {
+        val tree = load(context) ?: return false
+        val parent = try {
+            liveFolder(context, tree)
+        } catch (_: Exception) {
+            return false
+        }
+        cachedLiveChild(context, name)?.let { return true }
+        val found = findChild(context, tree, parent, name) ?: return false
+        cacheLiveChild(name, found)
+        return true
+    }
+
+    fun fileSize(context: Context, uri: Uri): Long? =
+        try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(DocumentsContract.Document.COLUMN_SIZE),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
 
     fun delete(context: Context, uri: Uri): Boolean =
         try {
@@ -145,12 +198,113 @@ object CloudFolderAccess {
             false
         }
 
-    fun deleteByPrefix(context: Context, prefix: String): Int {
+    fun deleteLiveByPrefix(context: Context, prefix: String): Int {
         val tree = load(context) ?: return 0
+        val parent = try {
+            liveFolder(context, tree)
+        } catch (_: Exception) {
+            return 0
+        }
         var deleted = 0
-        val children = childrenUri(tree)
+        queryChildren(context, tree, parent) { name, uri ->
+            if (name.startsWith(prefix) && delete(context, uri)) {
+                synchronized(cacheLock) { cachedLiveChildren.remove(name.lowercase()) }
+                deleted++
+            }
+        }
+        return deleted
+    }
+
+    fun deleteLegacyRootByPrefix(context: Context, prefix: String): Int {
+        val tree = load(context) ?: return 0
+        val root = rootDocumentUri(tree)
+        var deleted = 0
+        queryChildren(context, tree, root) { name, uri ->
+            if (name.startsWith(prefix) && delete(context, uri)) deleted++
+        }
+        return deleted
+    }
+
+    fun deleteLiveExact(context: Context, name: String): Boolean {
+        val tree = load(context) ?: return false
+        val parent = try {
+            liveFolder(context, tree)
+        } catch (_: Exception) {
+            return false
+        }
+        val uri = cachedLiveChild(context, name) ?: findChild(context, tree, parent, name) ?: return true
+        val deleted = delete(context, uri)
+        if (deleted) synchronized(cacheLock) { cachedLiveChildren.remove(name.lowercase()) }
+        return deleted
+    }
+
+    private fun liveFolder(context: Context, tree: Uri): Uri {
+        synchronized(cacheLock) {
+            if (cachedTree == tree.toString()) {
+                cachedLiveFolder?.let { cached ->
+                    if (documentExists(context, cached)) return cached
+                    cachedLiveFolder = null
+                    cachedLiveChildren.clear()
+                }
+            }
+        }
+        val root = rootDocumentUri(tree)
+        val existing = findChild(context, tree, root, INTERNAL_FOLDER_NAME)
+        val folder = existing ?: DocumentsContract.createDocument(
+            context.contentResolver,
+            root,
+            DocumentsContract.Document.MIME_TYPE_DIR,
+            INTERNAL_FOLDER_NAME,
+        ) ?: throw IOException("OneDrive provider refused to create internal live folder")
+        synchronized(cacheLock) {
+            cachedTree = tree.toString()
+            cachedLiveFolder = folder
+            cachedLiveChildren.clear()
+        }
+        return folder
+    }
+
+    private fun cachedLiveChild(context: Context, name: String): Uri? {
+        val key = name.lowercase()
+        val uri = synchronized(cacheLock) { cachedLiveChildren[key] } ?: return null
+        if (documentExists(context, uri)) return uri
+        synchronized(cacheLock) { cachedLiveChildren.remove(key) }
+        return null
+    }
+
+    private fun documentExists(context: Context, uri: Uri): Boolean =
+        try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
+                null,
+                null,
+                null,
+            )?.use { it.moveToFirst() } == true
+        } catch (_: Exception) {
+            false
+        }
+
+    private fun cacheLiveChild(name: String, uri: Uri) {
+        synchronized(cacheLock) { cachedLiveChildren[name.lowercase()] = uri }
+    }
+
+    private fun findChild(context: Context, tree: Uri, parent: Uri, name: String): Uri? {
+        var found: Uri? = null
+        queryChildren(context, tree, parent) { childName, uri ->
+            if (found == null && childName.equals(name, ignoreCase = true)) found = uri
+        }
+        return found
+    }
+
+    private inline fun queryChildren(
+        context: Context,
+        tree: Uri,
+        parent: Uri,
+        block: (String, Uri) -> Unit,
+    ) {
         context.contentResolver.query(
-            children,
+            childrenUri(tree, parent),
             arrayOf(
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME,
@@ -163,46 +317,37 @@ object CloudFolderAccess {
             val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
             while (cursor.moveToNext()) {
                 val name = cursor.getString(nameColumn) ?: continue
-                if (!name.startsWith(prefix)) continue
-                val uri = DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(idColumn))
-                if (delete(context, uri)) deleted++
+                block(name, DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(idColumn)))
             }
         }
-        return deleted
     }
 
-    private fun findChild(context: Context, tree: Uri, name: String): Uri? {
-        val children = childrenUri(tree)
-        context.contentResolver.query(
-            children,
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            ),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-            val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-            while (cursor.moveToNext()) {
-                if (cursor.getString(nameColumn).equals(name, ignoreCase = true)) {
-                    return DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(idColumn))
-                }
-            }
-        }
-        return null
-    }
-
-    private fun childrenUri(tree: Uri): Uri = DocumentsContract.buildChildDocumentsUriUsingTree(
+    private fun childrenUri(tree: Uri, parent: Uri): Uri = DocumentsContract.buildChildDocumentsUriUsingTree(
         tree,
-        DocumentsContract.getTreeDocumentId(tree),
+        DocumentsContract.getDocumentId(parent),
     )
 
     private fun rootDocumentUri(tree: Uri): Uri = DocumentsContract.buildDocumentUriUsingTree(
         tree,
         DocumentsContract.getTreeDocumentId(tree),
     )
+
+    private fun ensureCacheTree(tree: Uri) {
+        synchronized(cacheLock) {
+            if (cachedTree == tree.toString()) return
+            cachedTree = tree.toString()
+            cachedLiveFolder = null
+            cachedLiveChildren.clear()
+        }
+    }
+
+    private fun invalidateCache() {
+        synchronized(cacheLock) {
+            cachedTree = null
+            cachedLiveFolder = null
+            cachedLiveChildren.clear()
+        }
+    }
 
     private fun release(context: Context, uri: Uri) {
         try {
@@ -213,6 +358,4 @@ object CloudFolderAccess {
         } catch (_: SecurityException) {
         }
     }
-
-    private const val INTERNAL_PREFIX = "__sr_"
 }

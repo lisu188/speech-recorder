@@ -131,13 +131,13 @@ class SettingsActivity : Activity() {
         addSection(
             content,
             "Jak działa zapis",
-            "Wybierz w systemowym selektorze folder w OneDrive, np. SpeechRecorder. Podczas aktywnego klipu aplikacja co 15 s domyka poprawny WAV bezpieczeństwa i natychmiast przekazuje go providerowi OneDrive poza wątkiem mikrofonu. WorkManager przejmuje zapis przy błędzie lub po odtworzeniu procesu. Po zakończeniu klipu wysyłany jest pełny WAV, a fragmenty techniczne są usuwane dopiero po jego poprawnym zapisie. Po utracie dostępu lub błędzie providera WorkManager ponawia operację.",
+            "Wybierz w systemowym selektorze folder w OneDrive, np. SpeechRecorder. Podczas aktywnego klipu aplikacja co 15 s domyka poprawny WAV bezpieczeństwa i zapisuje go w wewnętrznym katalogu __sr_live. Po zakończeniu klipu pełny WAV jest uznawany za zapisany dopiero po weryfikacji rozmiaru i utworzeniu receipt. Fragmenty bezpieczeństwa są usuwane wyłącznie po takim potwierdzeniu. WorkManager przejmuje retry po błędzie lub odtworzeniu procesu.",
         )
 
         addSection(
             content,
             "Kompresja archiwum",
-            "WAV-y starsze niż 30 dni są raz dziennie pakowane bezstratnie do .wav.zip w OneDrive. Oryginalny WAV jest usuwany dopiero po poprawnym utworzeniu archiwum. Pliki ZIP pozostają dostępne w OneDrive i nie są wyświetlane jako bieżące nagrania w aplikacji.",
+            "WAV-y starsze niż 30 dni są pakowane bezstratnie do .wav.zip podczas ładowania urządzenia. Wiek jest liczony przede wszystkim z daty nagrania zapisanej w nazwie, a nie z daty synchronizacji OneDrive. Oryginalny WAV jest usuwany dopiero po weryfikacji rozmiaru gotowego archiwum. Pliki ZIP pozostają dostępne w OneDrive i nie są wyświetlane jako bieżące nagrania w aplikacji.",
         )
 
         addSection(

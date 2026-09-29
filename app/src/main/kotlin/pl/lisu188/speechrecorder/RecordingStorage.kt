@@ -8,6 +8,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import androidx.work.BackoffPolicy
+import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
@@ -18,6 +19,7 @@ import androidx.work.Worker
 import androidx.work.WorkerParameters
 import java.io.File
 import java.io.FileOutputStream
+import java.io.FilterOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -47,6 +49,7 @@ object RecordingStorage {
     private val migrationExecutor = Executors.newSingleThreadExecutor()
     private val cloudUploadExecutor = Executors.newSingleThreadExecutor()
     private val recoveryLock = Any()
+    private val archiveLock = Any()
 
     data class StoredRecording(
         val uri: Uri,
@@ -84,13 +87,32 @@ object RecordingStorage {
     internal fun livePrefix(finalName: String): String =
         "$LIVE_PREFIX${finalName.removeSuffix(".wav")}_part"
 
+    internal fun commitMarkerName(finalName: String): String {
+        require(finalName.matches(FINAL_NAME_REGEX))
+        return "commit_${finalName.removeSuffix(".wav")}.ok"
+    }
+
     internal fun archiveName(name: String): String = "$name.zip"
+
+    internal fun recordingTimestamp(name: String, lastModifiedMs: Long): Long =
+        timestampFromName(name).takeIf { it > 0L } ?: lastModifiedMs.takeIf { it > 0L } ?: 0L
 
     internal fun shouldArchive(name: String, lastModifiedMs: Long, nowMs: Long = System.currentTimeMillis()): Boolean {
         if (!name.endsWith(".wav", ignoreCase = true) || name.startsWith(LIVE_PREFIX)) return false
-        val timestamp = lastModifiedMs.takeIf { it > 0L } ?: timestampFromName(name)
+        val timestamp = recordingTimestamp(name, lastModifiedMs)
         return timestamp > 0L && nowMs - timestamp >= ARCHIVE_AFTER_MS
     }
+
+    internal fun archiveConstraints(): Constraints =
+        Constraints.Builder()
+            .setRequiresCharging(true)
+            .build()
+
+    internal fun remoteSizeMatches(expectedSize: Long, remoteSize: Long?): Boolean =
+        remoteSize != null && expectedSize >= 0L && remoteSize == expectedSize
+
+    internal fun <T> withArchiveLock(block: () -> T): T =
+        synchronized(archiveLock) { block() }
 
     fun enqueue(context: Context, file: File) {
         try {
@@ -153,6 +175,7 @@ object RecordingStorage {
         if (!CloudFolderAccess.hasAccess(context)) return
         try {
             val periodic = PeriodicWorkRequestBuilder<ArchiveMaintenanceWorker>(24, TimeUnit.HOURS)
+                .setConstraints(archiveConstraints())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .addTag("speech-recorder-archive")
                 .build()
@@ -170,6 +193,7 @@ object RecordingStorage {
         if (!CloudFolderAccess.hasAccess(context)) return
         try {
             val work = OneTimeWorkRequestBuilder<ArchiveMaintenanceWorker>()
+                .setConstraints(archiveConstraints())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .addTag("speech-recorder-archive")
                 .build()
@@ -234,7 +258,12 @@ object RecordingStorage {
                         val source = ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
                         val expectedSize = cursor.getLong(sizeColumn)
                         val copied = app.contentResolver.openInputStream(source)?.use { input ->
-                            copyToCloud(app, name, "audio/wav", input, expectedSize)
+                            try {
+                                copyToCloudVerified(app, name, "audio/wav", input, expectedSize)
+                                true
+                            } catch (_: Exception) {
+                                false
+                            }
                         } ?: false
                         if (copied) app.contentResolver.delete(source, null, null)
                     }
@@ -252,9 +281,15 @@ object RecordingStorage {
             StoredRecording(it.uri, it.name, it.sizeBytes, it.lastModifiedMs, it.archived)
         }
 
-    fun deletePublished(context: Context, uri: Uri): Boolean {
+    fun deletePublished(context: Context, uri: Uri, name: String? = null): Boolean {
         val deleted = CloudFolderAccess.delete(context, uri)
-        if (deleted) libraryChanged(context)
+        if (deleted) {
+            name?.takeIf { it.matches(FINAL_NAME_REGEX) }?.let {
+                CloudFolderAccess.deleteLiveExact(context, commitMarkerName(it))
+                CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(it))
+            }
+            libraryChanged(context)
+        }
         return deleted
     }
 
@@ -321,14 +356,17 @@ object RecordingStorage {
             return false
         }
 
+        val marker = commitMarkerName(wavFile.name)
         return try {
-            val expectedSize = wavFile.length()
-            wavFile.inputStream().use { input ->
-                if (!copyToCloud(context, wavFile.name, "audio/wav", input, expectedSize)) {
-                    throw IOException("OneDrive write failed")
+            if (!CloudFolderAccess.liveExists(context, marker)) {
+                val expectedSize = wavFile.length()
+                wavFile.inputStream().use { input ->
+                    copyToCloudVerified(context, wavFile.name, "audio/wav", input, expectedSize)
                 }
+                writeCommitReceipt(context, marker, expectedSize)
             }
-            CloudFolderAccess.deleteByPrefix(context, livePrefix(wavFile.name))
+            CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(wavFile.name))
+            CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(wavFile.name))
             liveDirectory(context).listFiles().orEmpty()
                 .filter { it.name.startsWith(livePrefix(wavFile.name)) }
                 .forEach { it.delete() }
@@ -346,17 +384,20 @@ object RecordingStorage {
         val finalName = finalNameForLivePart(file.name) ?: return false
         if (!file.exists()) return true
         if (!CloudFolderAccess.hasAccess(context)) return false
+        val marker = commitMarkerName(finalName)
         return try {
-            if (!CloudFolderAccess.exists(context, finalName)) {
+            if (!CloudFolderAccess.liveExists(context, marker)) {
                 val expectedSize = file.length()
                 file.inputStream().use { input ->
-                    if (!copyToCloud(context, file.name, "audio/wav", input, expectedSize)) {
-                        throw IOException("OneDrive live write failed")
-                    }
+                    copyLiveToCloudVerified(context, file.name, "audio/wav", input, expectedSize)
                 }
-                if (CloudFolderAccess.exists(context, finalName)) {
-                    CloudFolderAccess.deleteByPrefix(context, livePrefix(finalName))
+                if (CloudFolderAccess.liveExists(context, marker)) {
+                    CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(finalName))
+                    CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(finalName))
                 }
+            } else {
+                CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(finalName))
+                CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(finalName))
             }
             if (!file.delete()) throw IOException("Unable to remove uploaded live part")
             true
@@ -365,20 +406,21 @@ object RecordingStorage {
         }
     }
 
-    internal fun archiveOldRecordings(context: Context, nowMs: Long = System.currentTimeMillis()): Boolean {
-        if (!CloudFolderAccess.hasAccess(context)) return true
-        val candidates = listPublished(context)
-            .filter { !it.archived && shouldArchive(it.name, it.lastModifiedMs, nowMs) }
-            .sortedBy { it.lastModifiedMs }
-            .take(MAX_ARCHIVES_PER_RUN)
-        var success = true
-        var changed = false
-        candidates.forEach { recording ->
-            if (archiveRecording(context, recording)) changed = true else success = false
+    internal fun archiveOldRecordings(context: Context, nowMs: Long = System.currentTimeMillis()): Boolean =
+        withArchiveLock {
+            if (!CloudFolderAccess.hasAccess(context)) return@withArchiveLock true
+            val candidates = listPublished(context)
+                .filter { !it.archived && shouldArchive(it.name, it.lastModifiedMs, nowMs) }
+                .sortedBy { recordingTimestamp(it.name, it.lastModifiedMs) }
+                .take(MAX_ARCHIVES_PER_RUN)
+            var success = true
+            var changed = false
+            candidates.forEach { recording ->
+                if (archiveRecording(context, recording)) changed = true else success = false
+            }
+            if (changed) libraryChanged(context)
+            success
         }
-        if (changed) libraryChanged(context)
-        return success
-    }
 
     internal fun archiveRecording(context: Context, recording: StoredRecording): Boolean {
         val archiveUri = try {
@@ -389,14 +431,25 @@ object RecordingStorage {
         return try {
             val input = context.contentResolver.openInputStream(recording.uri)
                 ?: throw IOException("OneDrive source stream unavailable")
-            val output = context.contentResolver.openOutputStream(archiveUri, "wt")
+            val rawOutput = context.contentResolver.openOutputStream(archiveUri, "wt")
                 ?: throw IOException("OneDrive archive stream unavailable")
-            val copied = input.use { source -> output.use { target -> writeZip(source, target, recording.name) } }
+            val countedOutput = CountingOutputStream(rawOutput)
+            val copied = input.use { source -> countedOutput.use { target -> writeZip(source, target, recording.name) } }
             if (recording.sizeBytes > 0L && copied != recording.sizeBytes) {
                 throw IOException("Archive input was incomplete")
             }
+            val archivedBytes = countedOutput.bytesWritten
+            val remoteSize = awaitRemoteSize(context, archiveUri, archivedBytes)
+            if (archivedBytes <= 0L || !remoteSizeMatches(archivedBytes, remoteSize)) {
+                throw IOException("OneDrive archive size verification failed")
+            }
             if (!CloudFolderAccess.delete(context, recording.uri)) {
                 throw IOException("Unable to remove archived WAV")
+            }
+            if (recording.name.matches(FINAL_NAME_REGEX)) {
+                CloudFolderAccess.deleteLiveExact(context, commitMarkerName(recording.name))
+                CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(recording.name))
+                CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(recording.name))
             }
             true
         } catch (_: Exception) {
@@ -407,7 +460,7 @@ object RecordingStorage {
     internal fun writeZip(input: InputStream, output: OutputStream, entryName: String): Long {
         var copied = 0L
         ZipOutputStream(output.buffered()).use { zip ->
-            zip.setLevel(Deflater.BEST_COMPRESSION)
+            zip.setLevel(Deflater.DEFAULT_COMPRESSION)
             zip.putNextEntry(ZipEntry(entryName))
             val buffer = ByteArray(64 * 1024)
             while (true) {
@@ -423,21 +476,78 @@ object RecordingStorage {
         return copied
     }
 
-    private fun copyToCloud(
+    private fun copyToCloudVerified(
         context: Context,
         name: String,
         mimeType: String,
         input: InputStream,
         expectedSize: Long,
-    ): Boolean {
+    ): Uri {
         val target = CloudFolderAccess.openOrCreateFile(context, name, mimeType)
+        copyAndVerify(context, target, input, expectedSize)
+        return target
+    }
+
+    private fun copyLiveToCloudVerified(
+        context: Context,
+        name: String,
+        mimeType: String,
+        input: InputStream,
+        expectedSize: Long,
+    ): Uri {
+        val target = CloudFolderAccess.openOrCreateLiveFile(context, name, mimeType)
+        copyAndVerify(context, target, input, expectedSize)
+        return target
+    }
+
+    private fun copyAndVerify(context: Context, target: Uri, input: InputStream, expectedSize: Long) {
         val written = context.contentResolver.openOutputStream(target, "wt")?.buffered()?.use { output ->
             input.copyTo(output, 32768)
         } ?: throw IOException("OneDrive output stream unavailable")
-        if (expectedSize > 0L && written != expectedSize) {
+        if (written != expectedSize) {
             throw IOException("OneDrive write was incomplete")
         }
-        return true
+        val remoteSize = awaitRemoteSize(context, target, expectedSize)
+        if (!remoteSizeMatches(expectedSize, remoteSize)) {
+            throw IOException("OneDrive file size verification failed")
+        }
+    }
+
+    private fun writeCommitReceipt(context: Context, markerName: String, expectedSize: Long) {
+        val payload = expectedSize.toString().toByteArray(Charsets.US_ASCII)
+        val target = CloudFolderAccess.openOrCreateLiveFile(context, markerName, "application/octet-stream")
+        payload.inputStream().use { input -> copyAndVerify(context, target, input, payload.size.toLong()) }
+    }
+
+    private fun awaitRemoteSize(context: Context, target: Uri, expectedSize: Long): Long? {
+        repeat(4) { attempt ->
+            val size = CloudFolderAccess.fileSize(context, target)
+            if (size == expectedSize) return size
+            if (attempt < 3) {
+                try {
+                    Thread.sleep(100L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return size
+                }
+            }
+        }
+        return CloudFolderAccess.fileSize(context, target)
+    }
+
+    private class CountingOutputStream(output: OutputStream) : FilterOutputStream(output) {
+        var bytesWritten = 0L
+            private set
+
+        override fun write(value: Int) {
+            out.write(value)
+            bytesWritten++
+        }
+
+        override fun write(buffer: ByteArray, offset: Int, length: Int) {
+            out.write(buffer, offset, length)
+            bytesWritten += length
+        }
     }
 
     private fun clearStorageErrorIfEmpty(context: Context) {
