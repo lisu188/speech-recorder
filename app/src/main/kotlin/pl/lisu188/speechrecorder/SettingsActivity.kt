@@ -1,53 +1,102 @@
 package pl.lisu188.speechrecorder
 
-import android.app.Activity
 import android.content.Intent
-import android.graphics.Color
-import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Archive
+import androidx.compose.material.icons.outlined.BatteryChargingFull
+import androidx.compose.material.icons.outlined.CloudDone
+import androidx.compose.material.icons.outlined.CloudOff
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 
-class SettingsActivity : Activity() {
-    private lateinit var folderStatus: TextView
-    private lateinit var revokeFolderButton: Button
-    private lateinit var batteryStatus: TextView
-    private lateinit var batteryButton: Button
+class SettingsActivity : ComponentActivity() {
+    private val screenState = mutableStateOf(SettingsScreenState())
+
+    private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let { saveFolder(it) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(buildUi())
+        enableEdgeToEdge()
+        setContent {
+            SpeechRecorderTheme {
+                AppScaffold(this, AppDestination.SETTINGS) { padding ->
+                    SettingsScreen(
+                        state = screenState.value,
+                        modifier = Modifier.padding(padding),
+                        onChooseFolder = { folderPicker.launch(null) },
+                        onRevokeFolder = { revokeFolder() },
+                        onBatterySettings = { requestBatteryExemption() },
+                        onAppSettings = {
+                            startActivity(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.parse("package:$packageName")
+                                },
+                            )
+                        },
+                    )
+                }
+            }
+        }
+        refreshState()
     }
 
     override fun onResume() {
         super.onResume()
-        if (::folderStatus.isInitialized) refreshState()
+        refreshState()
     }
 
-    @Deprecated("Deprecated in Android API, retained for minSdk-compatible folder selection")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_ONEDRIVE_FOLDER || resultCode != RESULT_OK) return
-
-        val uri = data?.data ?: return
-        if (!CloudFolderAccess.save(this, uri, data.flags)) {
+    private fun saveFolder(uri: Uri) {
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        if (!CloudFolderAccess.save(this, uri, flags)) {
             Toast.makeText(
                 this,
-                "Nie udało się zachować dostępu do wybranego folderu. Wybierz folder z prawem zapisu.",
+                "Nie udało się zachować dostępu do folderu. Wybierz folder OneDrive z prawem zapisu.",
                 Toast.LENGTH_LONG,
             ).show()
             return
         }
 
-        refreshState()
         RecordingStorage.migrateMediaStore(this)
         RecordingStorage.recover(this)
+        refreshState()
 
         val authority = uri.authority.orEmpty().lowercase()
         val looksLikeOneDrive = authority.contains("microsoft") ||
@@ -56,207 +105,277 @@ class SettingsActivity : Activity() {
         Toast.makeText(
             this,
             if (looksLikeOneDrive) {
-                "Folder OneDrive zapisany. Oczekujące nagrania zostaną wysłane."
+                "Folder OneDrive zapisany."
             } else {
-                "Folder zapisany. Upewnij się, że wybrałeś go z sekcji OneDrive w selektorze Androida."
+                "Folder zapisany. Upewnij się, że pochodzi z sekcji OneDrive.",
             },
             Toast.LENGTH_LONG,
         ).show()
     }
 
-    private fun buildUi(): LinearLayout {
-        val page = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(18, 18, 18))
-        }
-
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(22), dp(22), dp(22))
-        }
-        val scroll = ScrollView(this).apply { addView(content, matchWrap()) }
-        page.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        content.addView(textView("Ustawienia", 30, Color.WHITE, true), matchWrap())
-        content.addView(
-            textView("Nagrywanie w tle i zapis do OneDrive", 15, Color.LTGRAY).apply {
-                setPadding(0, dp(6), 0, dp(22))
-            },
-            matchWrap(),
-        )
-
-        addSection(
-            content,
-            "Nagrywanie",
-            "5 s bufora przed wykrytą mową\n8 s ciszy kończy klip\nWAV 16 kHz mono\nAudio jest wykrywane i zapisywane lokalnie bez usług AI.",
-        )
-
-        addSection(
-            content,
-            "Działanie w tle",
-            "Ciągły dostęp do mikrofonu wymaga foreground service. Na Androidzie 13+ aplikacja nie prosi o zgodę na zwykłe powiadomienia, więc komunikat usługi nie jest pokazywany w panelu powiadomień; Android nadal pokazuje aktywną usługę w systemowym widoku aktywnych aplikacji. Na starszych wersjach Androida stałe powiadomienie usługi może być widoczne.",
-        )
-
-        content.addView(
-            textView("OneDrive", 18, Color.WHITE, true),
-            matchWrap().apply { topMargin = dp(12) },
-        )
-        folderStatus = textView("", 14, Color.LTGRAY).apply {
-            setPadding(0, dp(6), 0, dp(8))
-        }
-        content.addView(folderStatus, matchWrap())
-
-        content.addView(
-            Button(this).apply {
-                text = "WYBIERZ FOLDER W ONEDRIVE"
-                setOnClickListener { requestOneDriveFolder() }
-            },
-            matchWrap(),
-        )
-
-        revokeFolderButton = Button(this).apply {
-            text = "USUŃ DOSTĘP DO FOLDERU"
-            setOnClickListener {
-                CloudFolderAccess.clear(this@SettingsActivity)
-                refreshState()
-                Toast.makeText(
-                    this@SettingsActivity,
-                    "Dostęp usunięty. Niezapisane nagrania pozostaną bezpiecznie na telefonie.",
-                    Toast.LENGTH_LONG,
-                ).show()
-            }
-        }
-        content.addView(revokeFolderButton, matchWrap().apply { topMargin = dp(6) })
-
-        addSection(
-            content,
-            "Jak działa zapis",
-            "Wybierz w systemowym selektorze folder w OneDrive, np. SpeechRecorder. Podczas aktywnego klipu aplikacja co 15 s domyka poprawny WAV bezpieczeństwa i zapisuje go w wewnętrznym katalogu __sr_live. Po zakończeniu klipu pełny WAV jest uznawany za zapisany dopiero po weryfikacji rozmiaru i utworzeniu receipt. Fragmenty bezpieczeństwa są usuwane wyłącznie po takim potwierdzeniu. WorkManager przejmuje retry po błędzie lub odtworzeniu procesu.",
-        )
-
-        addSection(
-            content,
-            "Kompresja archiwum",
-            "WAV-y starsze niż 30 dni są pakowane bezstratnie do .wav.zip podczas ładowania urządzenia. Wiek jest liczony przede wszystkim z daty nagrania zapisanej w nazwie, a nie z daty synchronizacji OneDrive. Oryginalny WAV jest usuwany dopiero po weryfikacji rozmiaru gotowego archiwum. Pliki ZIP pozostają dostępne w OneDrive i nie są wyświetlane jako bieżące nagrania w aplikacji.",
-        )
-
-        addSection(
-            content,
-            "Migracja",
-            "Po wybraniu folderu aplikacja przeniesie istniejące pliki WAV z wcześniejszego Music/SpeechRecorder do wybranego folderu. Plik źródłowy jest kasowany dopiero po poprawnym skopiowaniu.",
-        )
-
-        addSection(
-            content,
-            "Prywatność",
-            "Integracja z OpenAI została usunięta. Aplikacja nie posiada klucza API, nie wykonuje transkrypcji i nie ma własnego uprawnienia INTERNET. Dostęp do OneDrive jest realizowany przez systemowy Storage Access Framework i provider OneDrive zainstalowany na urządzeniu.",
-        )
-
-        content.addView(
-            Button(this).apply {
-                text = "USTAWIENIA SYSTEMOWE APLIKACJI"
-                setOnClickListener {
-                    startActivity(
-                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                            data = Uri.parse("package:$packageName")
-                        },
-                    )
-                }
-            },
-            matchWrap().apply { topMargin = dp(14) },
-        )
-
-        batteryStatus = textView("", 14, Color.LTGRAY).apply {
-            setPadding(0, dp(16), 0, dp(4))
-        }
-        content.addView(batteryStatus, matchWrap())
-
-        batteryButton = Button(this).apply {
-            text = "WYŁĄCZ OPTYMALIZACJĘ BATERII"
-            setOnClickListener {
-                try {
-                    startActivity(
-                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                            data = Uri.parse("package:$packageName")
-                        },
-                    )
-                } catch (_: Exception) {
-                    startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-                }
-            }
-        }
-        content.addView(batteryButton, matchWrap().apply { topMargin = dp(6) })
-
-        addSection(
-            content,
-            "Tryb always-on",
-            "Po ręcznym uruchomieniu aplikacja używa START_STICKY, foreground service i częściowego wake locka. Zamknięcie ekranu lub usunięcie aplikacji z listy ostatnich nie wyłącza nasłuchu. Android może odtworzyć sticky foreground service po ubiciu procesu. Force stop, odebranie mikrofonu i restart telefonu wymagają ponownej interakcji użytkownika.",
-        )
-
+    private fun revokeFolder() {
+        CloudFolderAccess.clear(this)
         refreshState()
-        page.addView(AppNavigation.create(this, AppNavigation.SETTINGS), matchWrap())
-        return page
+        Toast.makeText(
+            this,
+            "Dostęp usunięty. Niezapisane nagrania pozostają na telefonie.",
+            Toast.LENGTH_LONG,
+        ).show()
     }
 
-    private fun requestOneDriveFolder() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-            addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+    private fun requestBatteryExemption() {
+        try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                },
+            )
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
         }
-        @Suppress("DEPRECATION")
-        startActivityForResult(intent, REQUEST_ONEDRIVE_FOLDER)
     }
 
     private fun refreshState() {
         val hasFolder = CloudFolderAccess.hasAccess(this)
-        folderStatus.text = if (hasFolder) {
-            "Folder zapisu: ${CloudFolderAccess.displayPath(this)}"
-        } else {
-            "Folder zapisu: nie wybrano. Nagrywanie wymaga jednorazowego wskazania folderu OneDrive."
-        }
-        revokeFolderButton.isEnabled = hasFolder
-
         val powerManager = getSystemService(PowerManager::class.java)
-        val unrestricted = powerManager.isIgnoringBatteryOptimizations(packageName)
-        batteryStatus.text = if (unrestricted) {
-            "Bateria: aplikacja jest wyłączona z optymalizacji — zalecane dla pracy ciągłej."
-        } else {
-            "Bateria: optymalizacja jest aktywna. Android może ograniczyć lub zatrzymać pracę w tle."
+        screenState.value = SettingsScreenState(
+            folderReady = hasFolder,
+            folderPath = if (hasFolder) CloudFolderAccess.displayPath(this) else null,
+            batteryUnrestricted = powerManager.isIgnoringBatteryOptimizations(packageName),
+        )
+    }
+}
+
+private data class SettingsScreenState(
+    val folderReady: Boolean = false,
+    val folderPath: String? = null,
+    val batteryUnrestricted: Boolean = false,
+)
+
+@Composable
+private fun SettingsScreen(
+    state: SettingsScreenState,
+    modifier: Modifier = Modifier,
+    onChooseFolder: () -> Unit,
+    onRevokeFolder: () -> Unit,
+    onBatterySettings: () -> Unit,
+    onAppSettings: () -> Unit,
+) {
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = ScreenPadding,
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        item {
+            PageHeader(
+                title = "Ustawienia",
+                subtitle = "Przechowywanie, niezawodność i prywatność.",
+            )
         }
-        batteryButton.isEnabled = !unrestricted
-    }
 
-    private fun addSection(parent: LinearLayout, heading: String, body: String) {
-        parent.addView(
-            textView(heading, 18, Color.WHITE, true),
-            matchWrap().apply { topMargin = dp(12) },
-        )
-        parent.addView(
-            textView(body, 14, Color.LTGRAY).apply {
-                setLineSpacing(0f, 1.15f)
-                setPadding(0, dp(6), 0, dp(12))
+        item {
+            SettingsStatusCard(state)
+        }
+
+        item {
+            SectionHeader("Przechowywanie")
+        }
+
+        item {
+            SettingsCard {
+                SettingsRow(
+                    icon = if (state.folderReady) Icons.Outlined.CloudDone else Icons.Outlined.CloudOff,
+                    title = "Folder OneDrive",
+                    body = state.folderPath ?: "Nie wybrano folderu zapisu",
+                )
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Button(
+                        onClick = onChooseFolder,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp),
+                    ) {
+                        Icon(Icons.Outlined.Folder, contentDescription = null)
+                        Text(
+                            if (state.folderReady) "Zmień folder" else "Wybierz folder",
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                    if (state.folderReady) {
+                        OutlinedButton(
+                            onClick = onRevokeFolder,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        ) {
+                            Text("Usuń dostęp")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            SectionHeader("Nagrywanie")
+        }
+
+        item {
+            SettingsCard {
+                SettingsRow(
+                    icon = Icons.Outlined.Mic,
+                    title = "Wykrywanie mowy",
+                    body = "5 s bufora przed mową · 8 s ciszy kończy klip · WAV 16 kHz mono",
+                )
+                HorizontalDivider()
+                SettingsRow(
+                    icon = Icons.Outlined.CloudDone,
+                    title = "Kopia bezpieczeństwa",
+                    body = "Podczas dłuższej rozmowy aplikacja regularnie zabezpiecza fragmenty w OneDrive, a po zakończeniu zapisuje pełny plik.",
+                )
+            }
+        }
+
+        item {
+            SectionHeader("Praca w tle")
+        }
+
+        item {
+            SettingsCard {
+                SettingsRow(
+                    icon = Icons.Outlined.BatteryChargingFull,
+                    title = if (state.batteryUnrestricted) "Bateria: bez ograniczeń" else "Bateria: optymalizacja aktywna",
+                    body = if (state.batteryUnrestricted) {
+                        "Zalecane ustawienie dla stałego nasłuchu."
+                    } else {
+                        "Android może ograniczać pracę mikrofonu w tle. Wyłącz optymalizację dla większej niezawodności."
+                    },
+                )
+                if (!state.batteryUnrestricted) {
+                    FilledTonalButton(
+                        onClick = onBatterySettings,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                            .heightIn(min = 48.dp),
+                    ) {
+                        Text("Wyłącz optymalizację baterii")
+                    }
+                }
+            }
+        }
+
+        item {
+            SectionHeader("Archiwum")
+        }
+
+        item {
+            SettingsCard {
+                SettingsRow(
+                    icon = Icons.Outlined.Archive,
+                    title = "Automatyczna kompresja",
+                    body = "Nagrania starsze niż 30 dni są bezstratnie pakowane do ZIP podczas ładowania telefonu. Oryginał jest usuwany dopiero po zweryfikowaniu archiwum.",
+                )
+            }
+        }
+
+        item {
+            SectionHeader("Prywatność")
+        }
+
+        item {
+            SettingsCard {
+                SettingsRow(
+                    icon = Icons.Outlined.Security,
+                    title = "Audio bez usług AI",
+                    body = "Aplikacja nie zawiera OpenAI, transkrypcji ani własnego dostępu do internetu. Synchronizację obsługuje systemowy provider OneDrive.",
+                )
+                HorizontalDivider()
+                SettingsRow(
+                    icon = Icons.Outlined.Info,
+                    title = "Stały nasłuch",
+                    body = "Android wymaga foreground service dla mikrofonu działającego w tle. Force stop lub odebranie uprawnienia zatrzyma usługę.",
+                )
+            }
+        }
+
+        item {
+            OutlinedButton(
+                onClick = onAppSettings,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp),
+            ) {
+                Icon(Icons.Outlined.OpenInNew, contentDescription = null)
+                Text("Ustawienia systemowe aplikacji", modifier = Modifier.padding(start = 8.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsStatusCard(state: SettingsScreenState) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (state.folderReady && state.batteryUnrestricted) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceContainerHigh
             },
-            matchWrap(),
-        )
+        ),
+        shape = MaterialTheme.shapes.extraLarge,
+    ) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = if (state.folderReady && state.batteryUnrestricted) {
+                    "Gotowe do pracy ciągłej"
+                } else {
+                    "Dokończ konfigurację"
+                },
+                style = MaterialTheme.typography.titleLarge,
+            )
+            Text(
+                text = when {
+                    !state.folderReady -> "Wybierz folder OneDrive, aby aplikacja mogła bezpiecznie zapisywać nagrania."
+                    !state.batteryUnrestricted -> "OneDrive jest gotowy. Wyłączenie optymalizacji baterii poprawi działanie always-on."
+                    else -> "OneDrive i ustawienia baterii są skonfigurowane."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
+}
 
-    private fun textView(value: String, size: Int, color: Int, bold: Boolean = false) = TextView(this).apply {
-        text = value
-        textSize = size.toFloat()
-        setTextColor(color)
-        if (bold) setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+@Composable
+private fun SettingsCard(content: @Composable () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Column(content = { content() })
     }
+}
 
-    private fun matchWrap() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
+@Composable
+private fun SettingsRow(
+    icon: ImageVector,
+    title: String,
+    body: String,
+) {
+    ListItem(
+        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        leadingContent = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        },
+        headlineContent = { Text(title) },
+        supportingContent = { Text(body) },
     )
-
-    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
-
-    private companion object {
-        const val REQUEST_ONEDRIVE_FOLDER = 7301
-    }
 }
