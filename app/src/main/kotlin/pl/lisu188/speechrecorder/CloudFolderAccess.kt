@@ -215,6 +215,16 @@ object CloudFolderAccess {
         return deleted
     }
 
+    fun deleteLegacyRootByPrefix(context: Context, prefix: String): Int {
+        val tree = load(context) ?: return 0
+        val root = rootDocumentUri(tree)
+        var deleted = 0
+        queryChildren(context, tree, root) { name, uri ->
+            if (name.startsWith(prefix) && delete(context, uri)) deleted++
+        }
+        return deleted
+    }
+
     fun deleteLiveExact(context: Context, name: String): Boolean {
         val tree = load(context) ?: return false
         val parent = try {
