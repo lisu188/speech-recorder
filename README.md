@@ -2,7 +2,7 @@
 
 Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VAD działają lokalnie jako foreground service. Zakończone klipy są zapisywane do folderu wybranego w OneDrive przez systemowy Storage Access Framework.
 
-## Wersja 1.6.1
+## Wersja 1.7.0
 
 - Kotlin 2.4.10
 - Android Gradle Plugin 9.3.2
@@ -28,6 +28,27 @@ Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VA
 - odtwarzanie, mini-waveformy, udostępnianie i usuwanie nagrań
 - migracja wcześniejszych WAV z `Music/SpeechRecorder` po skonfigurowaniu OneDrive
 - brak OpenAI, transkrypcji, kluczy API i uprawnienia `INTERNET`
+- interfejs Jetpack Compose + Material 3
+- dynamic color na Androidzie 12+
+- edge-to-edge z obsługą systemowych insets
+- adaptacyjna nawigacja: dolny pasek na telefonie, navigation rail na większych oknach
+- interaktywne elementy zgodne z minimalnym targetem 48 dp
+
+## Interfejs 1.7
+
+Warstwa prezentacji została przebudowana z ręcznie tworzonych `LinearLayout`/`TextView` na Jetpack Compose Material 3. Logika nagrywania, VAD, foreground service i OneDrive pozostała oddzielona od UI.
+
+Najważniejsze zmiany:
+
+- pełne edge-to-edge i respektowanie bezpiecznych obszarów systemowych,
+- Material You / dynamic color na Androidzie 12 i nowszym, z jasnym i ciemnym fallbackiem,
+- adaptacyjna nawigacja dla trzech głównych ekranów,
+- jeden dominujący CTA na ekranie Dyktafonu oraz czytelne stany: zatrzymane, nasłuchiwanie i nagrywanie,
+- oddzielne komunikaty błędów i statusu OneDrive zamiast łączenia ich z głównym stanem mikrofonu,
+- wyszukiwanie i sortowanie nagrań za pomocą komponentów Material 3,
+- karty nagrań z ikonami odtwarzania, udostępniania i usuwania oraz czytelnym stanem odtwarzania,
+- ustawienia pogrupowane według celu użytkownika: przechowywanie, nagrywanie, praca w tle, archiwum i prywatność,
+- odpowiednie opisy dostępności i co najmniej 48 dp dla interaktywnych targetów.
 
 ## Pierwsza konfiguracja
 
@@ -77,7 +98,7 @@ Nie istnieje zwykły mechanizm aplikacji, który pozwala zagwarantować nagrywan
 
 ## Prywatność
 
-Wersja 1.6.1 nie zawiera integracji OpenAI. Usunięto:
+Wersja 1.7.0 nie zawiera integracji OpenAI. Usunięto:
 
 - klienta OpenAI,
 - przechowywanie klucza API,
