@@ -45,6 +45,7 @@ object RecordingStorage {
     private const val MAX_ARCHIVES_PER_RUN = 8
     private val recoveryExecutor = Executors.newSingleThreadExecutor()
     private val migrationExecutor = Executors.newSingleThreadExecutor()
+    private val cloudUploadExecutor = Executors.newSingleThreadExecutor()
     private val recoveryLock = Any()
 
     data class StoredRecording(
@@ -108,7 +109,29 @@ object RecordingStorage {
         }
     }
 
+    fun enqueueCompleted(context: Context, file: File) {
+        val app = context.applicationContext
+        try {
+            cloudUploadExecutor.execute {
+                if (!publish(app, file)) enqueue(app, file)
+            }
+        } catch (_: Exception) {
+            enqueue(app, file)
+        }
+    }
+
     fun enqueueLivePart(context: Context, file: File) {
+        val app = context.applicationContext
+        try {
+            cloudUploadExecutor.execute {
+                if (!publishLivePart(app, file)) scheduleLivePartWorker(app, file)
+            }
+        } catch (_: Exception) {
+            scheduleLivePartWorker(app, file)
+        }
+    }
+
+    private fun scheduleLivePartWorker(context: Context, file: File) {
         try {
             val finalName = finalNameForLivePart(file.name) ?: return
             val work = OneTimeWorkRequestBuilder<LivePartPublishWorker>()
@@ -174,7 +197,7 @@ object RecordingStorage {
                         reportError(app, "Nagrania czekają lokalnie. Wybierz folder OneDrive w Ustawieniach.")
                         return@synchronized
                     }
-                    liveParts.forEach { enqueueLivePart(app, it) }
+                    liveParts.forEach { scheduleLivePartWorker(app, it) }
                     pending.forEach { enqueue(app, it) }
                     scheduleArchiveMaintenance(app)
                 } catch (_: Exception) {
