@@ -110,8 +110,6 @@ class RecorderService : Service() {
     private fun updateNotification(speechActive: Boolean) {
         val active = running.get() && prefs().getBoolean("enabled", false) && !destroyed
         prefs().edit().putBoolean("speech_active", speechActive && active).apply()
-        val manager = getSystemService(NotificationManager::class.java)
-        if (active) manager.notify(NOTIFICATION_ID, buildNotification(speechActive))
     }
 
     private fun stopWithError(message: String) {
