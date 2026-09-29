@@ -446,9 +446,11 @@ object RecordingStorage {
             if (!CloudFolderAccess.delete(context, recording.uri)) {
                 throw IOException("Unable to remove archived WAV")
             }
-            CloudFolderAccess.deleteLiveExact(context, commitMarkerName(recording.name))
-            CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(recording.name))
-            CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(recording.name))
+            if (recording.name.matches(FINAL_NAME_REGEX)) {
+                CloudFolderAccess.deleteLiveExact(context, commitMarkerName(recording.name))
+                CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(recording.name))
+                CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(recording.name))
+            }
             true
         } catch (_: Exception) {
             false
