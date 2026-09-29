@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import java.io.File
 import java.io.IOException
@@ -40,6 +41,7 @@ class RecorderService : Service() {
     private var lastSpeechTimestamp = 0L
     @Volatile private var destroyed = false
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -58,6 +60,7 @@ class RecorderService : Service() {
                 .apply()
             sendLevelBroadcast(0, false)
             stopCapture()
+            releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -79,6 +82,7 @@ class RecorderService : Service() {
         }
         activeService.set(serviceToken)
         prefs().edit().putBoolean("enabled", true).remove("capture_error").apply()
+        acquireWakeLock()
         if (!running.get()) startCapture()
         return START_STICKY
     }
@@ -91,6 +95,7 @@ class RecorderService : Service() {
         prefs().edit().putBoolean("speech_active", false).apply()
         sendLevelBroadcast(0, false)
         stopCapture()
+        releaseWakeLock()
         super.onDestroy()
     }
 
@@ -117,6 +122,7 @@ class RecorderService : Service() {
         prefs().edit().putBoolean("enabled", false).putBoolean("speech_active", false)
             .putString("capture_error", message).apply()
         stopCapture()
+        releaseWakeLock()
         sendLevelBroadcast(0, false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -159,6 +165,31 @@ class RecorderService : Service() {
                 lockscreenVisibility = Notification.VISIBILITY_SECRET
             },
         )
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (activeService.get() != null) {
+            prefs().edit().putBoolean("enabled", true).apply()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
+    private fun acquireWakeLock() {
+        val current = wakeLock
+        if (current?.isHeld == true) return
+        wakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SpeechRecorder:Microphone")
+            .apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+        wakeLock = null
     }
 
     private fun startCapture() {

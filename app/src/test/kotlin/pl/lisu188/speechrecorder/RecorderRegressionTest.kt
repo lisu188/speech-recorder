@@ -40,6 +40,8 @@ class RecorderRegressionTest {
         assertFalse("POST_NOTIFICATIONS must stay removed", Manifest.permission.POST_NOTIFICATIONS in requested)
         assertTrue(Manifest.permission.RECORD_AUDIO in requested)
         assertTrue(Manifest.permission.FOREGROUND_SERVICE in requested)
+        assertTrue(Manifest.permission.WAKE_LOCK in requested)
+        assertTrue(Manifest.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS in requested)
     }
 
     @Test fun rebootReceiverRequiresManualRestartWithoutPostingNotification() {
@@ -54,6 +56,7 @@ class RecorderRegressionTest {
         val prefs = context.getSharedPreferences("recorder", Context.MODE_PRIVATE)
         assertFalse(prefs.getBoolean("enabled", true))
         assertFalse(prefs.getBoolean("speech_active", true))
-        assertTrue(prefs.getString("capture_error", "").orEmpty().contains("ręcznego uruchomienia"))
+        assertTrue(prefs.getBoolean(BootReceiver.KEY_RESUME_AFTER_BOOT, false))
+        assertTrue(prefs.getString("capture_error", "").orEmpty().contains("wznowi się automatycznie"))
     }
 }
