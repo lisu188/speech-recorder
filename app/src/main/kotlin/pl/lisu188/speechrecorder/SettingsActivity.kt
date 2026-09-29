@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Button
 import android.widget.LinearLayout
@@ -16,6 +17,8 @@ import android.widget.Toast
 class SettingsActivity : Activity() {
     private lateinit var folderStatus: TextView
     private lateinit var revokeFolderButton: Button
+    private lateinit var batteryStatus: TextView
+    private lateinit var batteryButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -157,14 +160,31 @@ class SettingsActivity : Activity() {
             matchWrap().apply { topMargin = dp(14) },
         )
 
-        content.addView(
-            Button(this).apply {
-                text = "OPTYMALIZACJA BATERII"
-                setOnClickListener {
+        batteryStatus = textView("", 14, Color.LTGRAY).apply {
+            setPadding(0, dp(16), 0, dp(4))
+        }
+        content.addView(batteryStatus, matchWrap())
+
+        batteryButton = Button(this).apply {
+            text = "WYŁĄCZ OPTYMALIZACJĘ BATERII"
+            setOnClickListener {
+                try {
+                    startActivity(
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                            data = Uri.parse("package:$packageName")
+                        },
+                    )
+                } catch (_: Exception) {
                     startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                 }
-            },
-            matchWrap().apply { topMargin = dp(10) },
+            }
+        }
+        content.addView(batteryButton, matchWrap().apply { topMargin = dp(6) })
+
+        addSection(
+            content,
+            "Tryb always-on",
+            "Po ręcznym uruchomieniu aplikacja używa START_STICKY, foreground service i częściowego wake locka. Zamknięcie ekranu lub usunięcie aplikacji z listy ostatnich nie wyłącza nasłuchu. Android może odtworzyć sticky foreground service po ubiciu procesu. Force stop, odebranie mikrofonu i restart telefonu wymagają ponownej interakcji użytkownika.",
         )
 
         refreshState()
@@ -191,6 +211,15 @@ class SettingsActivity : Activity() {
             "Folder zapisu: nie wybrano. Nagrywanie wymaga jednorazowego wskazania folderu OneDrive."
         }
         revokeFolderButton.isEnabled = hasFolder
+
+        val powerManager = getSystemService(PowerManager::class.java)
+        val unrestricted = powerManager.isIgnoringBatteryOptimizations(packageName)
+        batteryStatus.text = if (unrestricted) {
+            "Bateria: aplikacja jest wyłączona z optymalizacji — zalecane dla pracy ciągłej."
+        } else {
+            "Bateria: optymalizacja jest aktywna. Android może ograniczyć lub zatrzymać pracę w tle."
+        }
+        batteryButton.isEnabled = !unrestricted
     }
 
     private fun addSection(parent: LinearLayout, heading: String, body: String) {
