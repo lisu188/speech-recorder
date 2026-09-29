@@ -1,33 +1,62 @@
 package pl.lisu188.speechrecorder
 
-import android.app.Activity
-import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.graphics.Color
-import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.text.Editable
-import android.text.TextWatcher
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.widget.ArrayAdapter
-import android.widget.BaseAdapter
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ListView
-import android.widget.Spinner
-import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Clear
+import androidx.compose.material.icons.outlined.CloudOff
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.GraphicEq
+import androidx.compose.material.icons.outlined.LibraryMusic
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.StopCircle
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import java.io.FileInputStream
 import java.text.DateFormat
@@ -40,16 +69,11 @@ import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.sqrt
 
-class RecordingsActivity : Activity() {
-    private val recordings = mutableListOf<Recording>()
-    private val visible = mutableListOf<Recording>()
-    private lateinit var adapter: RecordingAdapter
+class RecordingsActivity : ComponentActivity() {
+    private val screenState = mutableStateOf(RecordingsScreenState())
+    private var recordings = emptyList<Recording>()
     private var player: MediaPlayer? = null
     private var playingUri: Uri? = null
-    private lateinit var summary: TextView
-    private lateinit var nowPlaying: TextView
-    private lateinit var search: EditText
-    private lateinit var sort: Spinner
     private val loadExecutor = Executors.newSingleThreadExecutor()
     private var loadTask: Future<*>? = null
     private var loadGeneration = 0
@@ -65,7 +89,34 @@ class RecordingsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(buildUi())
+        enableEdgeToEdge()
+        setContent {
+            SpeechRecorderTheme {
+                AppScaffold(this, AppDestination.RECORDINGS) { padding ->
+                    RecordingsScreen(
+                        state = screenState.value,
+                        modifier = Modifier.padding(padding),
+                        onRefresh = { loadRecordings() },
+                        onQueryChange = { updateFilter(query = it) },
+                        onSortChange = { updateFilter(sortIndex = it) },
+                        onPlay = { togglePlayback(it) },
+                        onShare = { shareRecording(it) },
+                        onDeleteRequest = {
+                            screenState.value = screenState.value.copy(pendingDelete = it)
+                        },
+                        onDeleteDismiss = {
+                            screenState.value = screenState.value.copy(pendingDelete = null)
+                        },
+                        onDeleteConfirm = {
+                            screenState.value.pendingDelete?.let { recording ->
+                                screenState.value = screenState.value.copy(pendingDelete = null)
+                                deleteRecording(recording)
+                            }
+                        },
+                    )
+                }
+            }
+        }
     }
 
     override fun onResume() {
@@ -79,7 +130,7 @@ class RecordingsActivity : Activity() {
             )
             libraryReceiverRegistered = true
         }
-        if (::adapter.isInitialized) loadRecordings()
+        loadRecordings()
     }
 
     override fun onPause() {
@@ -96,94 +147,25 @@ class RecordingsActivity : Activity() {
         loadGeneration++
         loadTask?.cancel(true)
         loadExecutor.shutdownNow()
-        stopPlayback()
+        stopPlayback(updateUi = false)
         super.onDestroy()
-    }
-
-    private fun buildUi(): View {
-        val page = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(18, 18, 18))
-        }
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(18), dp(18), dp(8))
-        }
-        page.addView(content, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        content.addView(textView("Nagrania", 30, Color.WHITE, true), matchWrap())
-        summary = textView("0 nagrań", 14, Color.LTGRAY).apply {
-            setPadding(0, dp(4), 0, dp(14))
-        }
-        content.addView(summary, matchWrap())
-        content.addView(
-            Button(this).apply {
-                text = "ODŚWIEŻ ONEDRIVE"
-                setOnClickListener { loadRecordings() }
-            },
-            matchWrap(),
-        )
-
-        search = EditText(this).apply {
-            hint = "Szukaj w nazwach nagrań"
-            isSingleLine = true
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = applyFilterAndSort()
-                override fun afterTextChanged(s: Editable?) = Unit
-            })
-        }
-        content.addView(search, matchWrap())
-
-        sort = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@RecordingsActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                SORT_LABELS,
-            )
-            onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    applyFilterAndSort()
-                }
-
-                override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
-            }
-        }
-        content.addView(sort, matchWrap().apply { topMargin = dp(6) })
-
-        nowPlaying = textView("Nic nie jest odtwarzane", 13, Color.rgb(111, 207, 135)).apply {
-            setPadding(0, dp(8), 0, dp(8))
-        }
-        content.addView(nowPlaying, matchWrap())
-
-        adapter = RecordingAdapter()
-        content.addView(
-            ListView(this).apply {
-                dividerHeight = dp(1)
-                setCacheColorHint(Color.TRANSPARENT)
-                adapter = this@RecordingsActivity.adapter
-            },
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f),
-        )
-
-        page.addView(AppNavigation.create(this, AppNavigation.RECORDINGS), matchWrap())
-        return page
     }
 
     private fun loadRecordings() {
         val generation = ++loadGeneration
         loadTask?.cancel(true)
         if (!CloudFolderAccess.hasAccess(this)) {
-            recordings.clear()
-            visible.clear()
-            summary.text = "Wybierz folder OneDrive w Ustawieniach"
-            adapter.notifyDataSetChanged()
+            recordings = emptyList()
+            screenState.value = screenState.value.copy(
+                visible = emptyList(),
+                loading = false,
+                cloudReady = false,
+                error = null,
+            )
             return
         }
 
-        summary.text = "Wczytywanie z OneDrive…"
+        screenState.value = screenState.value.copy(loading = true, cloudReady = true, error = null)
         loadTask = loadExecutor.submit {
             try {
                 val loaded = RecordingStorage.listPublished(this).map { stored ->
@@ -191,7 +173,7 @@ class RecordingsActivity : Activity() {
                     Recording(
                         uri = stored.uri,
                         name = stored.name,
-                        dateAdded = stored.lastModifiedMs.takeIf { it > 0L } ?: timestampFromName(stored.name),
+                        dateAdded = RecordingStorage.recordingTimestamp(stored.name, stored.lastModifiedMs),
                         sizeBytes = stored.sizeBytes,
                         durationMs = readDuration(stored.uri),
                         waveform = buildWaveform(stored.uri, stored.sizeBytes),
@@ -199,47 +181,58 @@ class RecordingsActivity : Activity() {
                 }
                 runOnUiThread {
                     if (generation == loadGeneration && !isDestroyed) {
-                        recordings.clear()
-                        recordings.addAll(loaded)
-                        applyFilterAndSort()
+                        recordings = loaded
+                        updateFilter(loading = false, error = null)
                     }
                 }
+            } catch (_: InterruptedException) {
             } catch (_: Exception) {
                 runOnUiThread {
                     if (generation == loadGeneration && !isDestroyed) {
-                        applyFilterAndSort()
-                        Toast.makeText(
-                            this,
-                            "Nie udało się odczytać OneDrive. Sprawdź połączenie i dostęp do folderu.",
-                            Toast.LENGTH_LONG,
-                        ).show()
+                        updateFilter(
+                            loading = false,
+                            error = "Nie udało się odczytać OneDrive. Sprawdź połączenie i dostęp do folderu.",
+                        )
                     }
                 }
             }
         }
     }
 
-    private fun applyFilterAndSort() {
-        if (!::adapter.isInitialized || !::search.isInitialized || !::sort.isInitialized) return
-        val query = search.text.toString().trim().lowercase(Locale.getDefault())
-        visible.clear()
-        visible += recordings.filter { recording ->
-            query.isEmpty() ||
-                recording.name.lowercase(Locale.getDefault()).contains(query) ||
-                displayTitle(recording).lowercase(Locale.getDefault()).contains(query) ||
-                formatDate(recording.dateAdded).lowercase(Locale.getDefault()).contains(query)
-        }
+    private fun updateFilter(
+        query: String? = null,
+        sortIndex: Int? = null,
+        loading: Boolean? = null,
+        error: String? = screenState.value.error,
+    ) {
+        val previous = screenState.value
+        val resolvedQuery = query ?: previous.query
+        val resolvedSort = sortIndex ?: previous.sortIndex
+        val normalized = resolvedQuery.trim().lowercase(Locale.getDefault())
 
-        when (sort.selectedItemPosition) {
+        val visible = recordings.filter { recording ->
+            normalized.isEmpty() ||
+                recording.name.lowercase(Locale.getDefault()).contains(normalized) ||
+                displayTitle(recording).lowercase(Locale.getDefault()).contains(normalized) ||
+                formatDate(recording.dateAdded).lowercase(Locale.getDefault()).contains(normalized)
+        }.toMutableList()
+
+        when (resolvedSort) {
             1 -> visible.sortBy { it.dateAdded }
             2 -> visible.sortByDescending { it.durationMs }
             3 -> visible.sortByDescending { it.sizeBytes }
             else -> visible.sortByDescending { it.dateAdded }
         }
 
-        val totalBytes = visible.sumOf { it.sizeBytes }
-        summary.text = "${visible.size}${if (visible.size == 1) " nagranie" else " nagrań"}  •  ${formatSize(totalBytes)}  •  OneDrive"
-        adapter.notifyDataSetChanged()
+        screenState.value = previous.copy(
+            visible = visible,
+            query = resolvedQuery,
+            sortIndex = resolvedSort,
+            loading = loading ?: previous.loading,
+            cloudReady = true,
+            playingUri = playingUri,
+            error = error,
+        )
     }
 
     private fun readDuration(uri: Uri): Long {
@@ -294,7 +287,6 @@ class RecordingsActivity : Activity() {
     private fun togglePlayback(recording: Recording) {
         if (playingUri == recording.uri && player?.isPlaying == true) {
             stopPlayback()
-            adapter.notifyDataSetChanged()
             return
         }
 
@@ -302,16 +294,12 @@ class RecordingsActivity : Activity() {
         try {
             player = MediaPlayer().apply {
                 setDataSource(this@RecordingsActivity, recording.uri)
-                setOnCompletionListener {
-                    stopPlayback()
-                    adapter.notifyDataSetChanged()
-                }
+                setOnCompletionListener { stopPlayback() }
                 prepare()
                 start()
             }
             playingUri = recording.uri
-            nowPlaying.text = "Odtwarzanie: ${displayTitle(recording)}"
-            adapter.notifyDataSetChanged()
+            screenState.value = screenState.value.copy(playingUri = playingUri)
         } catch (_: Exception) {
             stopPlayback()
             Toast.makeText(this, "Nie udało się odtworzyć nagrania z OneDrive", Toast.LENGTH_LONG).show()
@@ -331,15 +319,6 @@ class RecordingsActivity : Activity() {
         )
     }
 
-    private fun confirmDelete(recording: Recording) {
-        AlertDialog.Builder(this)
-            .setTitle("Usunąć nagranie z OneDrive?")
-            .setMessage(displayTitle(recording))
-            .setNegativeButton("Anuluj", null)
-            .setPositiveButton("Usuń") { _, _ -> deleteRecording(recording) }
-            .show()
-    }
-
     private fun deleteRecording(recording: Recording) {
         if (playingUri == recording.uri) stopPlayback()
         if (RecordingStorage.deletePublished(this, recording.uri, recording.name)) {
@@ -350,7 +329,7 @@ class RecordingsActivity : Activity() {
         }
     }
 
-    private fun stopPlayback() {
+    private fun stopPlayback(updateUi: Boolean = true) {
         player?.let {
             try {
                 it.stop()
@@ -360,165 +339,365 @@ class RecordingsActivity : Activity() {
         }
         player = null
         playingUri = null
-        if (::nowPlaying.isInitialized) nowPlaying.text = "Nic nie jest odtwarzane"
-    }
-
-    private fun displayTitle(recording: Recording): String {
-        val timestamp = timestampFromName(recording.name)
-        if (timestamp > 0L) {
-            return "Nagranie ${SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale.getDefault()).format(Date(timestamp))}"
-        }
-        return recording.name.substringBeforeLast('.').replace('_', ' ')
-    }
-
-    private fun timestampFromName(name: String): Long {
-        val match = Regex("^speech_(\\d{8})_(\\d{6})").find(name) ?: return 0L
-        return try {
-            SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).apply { isLenient = false }
-                .parse("${match.groupValues[1]}_${match.groupValues[2]}")
-                ?.time ?: 0L
-        } catch (_: Exception) {
-            0L
+        if (updateUi && !isDestroyed) {
+            screenState.value = screenState.value.copy(playingUri = null)
         }
     }
 
-    private fun formatDate(millis: Long): String =
-        if (millis > 0L) {
-            DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(millis))
-        } else {
-            "Brak daty"
-        }
-
-    private fun formatDuration(ms: Long): String {
-        val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
-        return if (totalSeconds >= 3600L) {
-            String.format(
-                Locale.getDefault(),
-                "%d:%02d:%02d",
-                totalSeconds / 3600L,
-                (totalSeconds % 3600L) / 60L,
-                totalSeconds % 60L,
-            )
-        } else {
-            String.format(Locale.getDefault(), "%d:%02d", totalSeconds / 60L, totalSeconds % 60L)
-        }
-    }
-
-    private fun formatSize(bytes: Long) = if (bytes < 1024L * 1024L) {
-        String.format(Locale.getDefault(), "%.1f KB", bytes / 1024.0)
-    } else {
-        String.format(Locale.getDefault(), "%.1f MB", bytes / (1024.0 * 1024.0))
-    }
-
-    private fun textView(value: String, size: Int, color: Int, bold: Boolean = false) = TextView(this).apply {
-        text = value
-        textSize = size.toFloat()
-        setTextColor(color)
-        if (bold) setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-    }
-
-    private fun matchWrap() = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-    )
-
-    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
-
-    private inner class RecordingAdapter : BaseAdapter() {
-        override fun getCount() = visible.size
-        override fun getItem(position: Int) = visible[position]
-        override fun getItemId(position: Int) = position.toLong()
-
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val recording = getItem(position)
-            return LinearLayout(this@RecordingsActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(6), dp(10), dp(6), dp(10))
-
-                addView(
-                    LinearLayout(this@RecordingsActivity).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-
-                        addView(
-                            Button(this@RecordingsActivity).apply {
-                                text = if (recording.uri == playingUri && player?.isPlaying == true) "Ⅱ" else "▶"
-                                minWidth = dp(54)
-                                setOnClickListener { togglePlayback(recording) }
-                            },
-                            LinearLayout.LayoutParams(dp(58), LinearLayout.LayoutParams.WRAP_CONTENT),
-                        )
-
-                        addView(
-                            LinearLayout(this@RecordingsActivity).apply {
-                                orientation = LinearLayout.VERTICAL
-                                setPadding(dp(10), 0, 0, 0)
-                                addView(textView(displayTitle(recording), 16, Color.WHITE, true), matchWrap())
-                                addView(
-                                    textView(
-                                        "${formatDate(recording.dateAdded)}  •  ${formatDuration(recording.durationMs)}  •  ${formatSize(recording.sizeBytes)}",
-                                        12,
-                                        Color.LTGRAY,
-                                    ).apply { maxLines = 1 },
-                                    matchWrap(),
-                                )
-                                if (recording.waveform.isNotEmpty()) {
-                                    addView(
-                                        textView(recording.waveform, 18, Color.rgb(111, 207, 135)).apply {
-                                            letterSpacing = 0.02f
-                                        },
-                                        matchWrap(),
-                                    )
-                                }
-                            },
-                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
-                        )
-                    },
-                    matchWrap(),
-                )
-
-                addView(
-                    LinearLayout(this@RecordingsActivity).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.END
-                        setPadding(dp(58), dp(6), 0, 0)
-                        addView(
-                            Button(this@RecordingsActivity).apply {
-                                text = "UDOSTĘPNIJ"
-                                textSize = 11f
-                                setOnClickListener { shareRecording(recording) }
-                            },
-                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
-                        )
-                        addView(
-                            Button(this@RecordingsActivity).apply {
-                                text = "USUŃ"
-                                textSize = 11f
-                                setOnClickListener { confirmDelete(recording) }
-                            },
-                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                                leftMargin = dp(6)
-                            },
-                        )
-                    },
-                    matchWrap(),
-                )
-            }
-        }
-    }
-
-    private data class Recording(
-        val uri: Uri,
-        val name: String,
-        val dateAdded: Long,
-        val sizeBytes: Long,
-        val durationMs: Long,
-        val waveform: String,
-    )
-
-    private companion object {
+    companion object {
         val SORT_LABELS = listOf("Najnowsze", "Najstarsze", "Najdłuższe", "Największe")
         val BARS = charArrayOf('▁', '▂', '▃', '▄', '▅', '▆', '▇', '█')
         const val WAVEFORM_BARS = 28
     }
+}
+
+private data class Recording(
+    val uri: Uri,
+    val name: String,
+    val dateAdded: Long,
+    val sizeBytes: Long,
+    val durationMs: Long,
+    val waveform: String,
+)
+
+private data class RecordingsScreenState(
+    val visible: List<Recording> = emptyList(),
+    val query: String = "",
+    val sortIndex: Int = 0,
+    val loading: Boolean = false,
+    val cloudReady: Boolean = true,
+    val playingUri: Uri? = null,
+    val pendingDelete: Recording? = null,
+    val error: String? = null,
+)
+
+@Composable
+private fun RecordingsScreen(
+    state: RecordingsScreenState,
+    modifier: Modifier = Modifier,
+    onRefresh: () -> Unit,
+    onQueryChange: (String) -> Unit,
+    onSortChange: (Int) -> Unit,
+    onPlay: (Recording) -> Unit,
+    onShare: (Recording) -> Unit,
+    onDeleteRequest: (Recording) -> Unit,
+    onDeleteDismiss: () -> Unit,
+    onDeleteConfirm: () -> Unit,
+) {
+    state.pendingDelete?.let { recording ->
+        AlertDialog(
+            onDismissRequest = onDeleteDismiss,
+            title = { Text("Usunąć nagranie?") },
+            text = { Text(displayTitle(recording)) },
+            confirmButton = {
+                TextButton(onClick = onDeleteConfirm) {
+                    Text("Usuń", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDeleteDismiss) {
+                    Text("Anuluj")
+                }
+            },
+        )
+    }
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = ScreenPadding,
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                PageHeader(
+                    title = "Nagrania",
+                    subtitle = if (state.cloudReady) {
+                        recordingSummary(state.visible)
+                    } else {
+                        "Wybierz folder OneDrive w Ustawieniach."
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(
+                    onClick = onRefresh,
+                    enabled = !state.loading,
+                ) {
+                    if (state.loading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Icon(Icons.Outlined.Refresh, contentDescription = "Odśwież OneDrive")
+                    }
+                }
+            }
+        }
+
+        if (!state.cloudReady) {
+            item {
+                EmptyRecordingsCard(
+                    icon = Icons.Outlined.CloudOff,
+                    title = "Brak folderu OneDrive",
+                    body = "Skonfiguruj folder zapisu w Ustawieniach, aby zobaczyć nagrania.",
+                )
+            }
+        } else {
+            item {
+                OutlinedTextField(
+                    value = state.query,
+                    onValueChange = onQueryChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Szukaj nagrań") },
+                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (state.query.isNotEmpty()) {
+                            IconButton(onClick = { onQueryChange("") }) {
+                                Icon(Icons.Outlined.Clear, contentDescription = "Wyczyść wyszukiwanie")
+                            }
+                        }
+                    },
+                )
+            }
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    RecordingsActivity.SORT_LABELS.forEachIndexed { index, label ->
+                        FilterChip(
+                            selected = state.sortIndex == index,
+                            onClick = { onSortChange(index) },
+                            label = { Text(label) },
+                        )
+                    }
+                }
+            }
+
+            state.error?.let { message ->
+                item {
+                    EmptyRecordingsCard(
+                        icon = Icons.Outlined.CloudOff,
+                        title = "Nie udało się odświeżyć",
+                        body = message,
+                    )
+                }
+            }
+
+            if (state.visible.isEmpty() && !state.loading && state.error == null) {
+                item {
+                    EmptyRecordingsCard(
+                        icon = Icons.Outlined.LibraryMusic,
+                        title = if (state.query.isBlank()) "Brak nagrań" else "Brak wyników",
+                        body = if (state.query.isBlank()) {
+                            "Gdy aplikacja wykryje mowę, zapisane klipy pojawią się tutaj."
+                        } else {
+                            "Zmień wyszukiwaną frazę lub wyczyść filtr."
+                        },
+                    )
+                }
+            }
+
+            items(
+                items = state.visible,
+                key = { it.uri.toString() },
+            ) { recording ->
+                RecordingCard(
+                    recording = recording,
+                    playing = state.playingUri == recording.uri,
+                    onPlay = { onPlay(recording) },
+                    onShare = { onShare(recording) },
+                    onDelete = { onDeleteRequest(recording) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecordingCard(
+    recording: Recording,
+    playing: Boolean,
+    onPlay: () -> Unit,
+    onShare: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (playing) {
+                MaterialTheme.colorScheme.secondaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceContainer
+            },
+        ),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                IconButton(
+                    onClick = onPlay,
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(
+                        imageVector = if (playing) Icons.Outlined.StopCircle else Icons.Outlined.PlayArrow,
+                        contentDescription = if (playing) "Zatrzymaj odtwarzanie" else "Odtwórz nagranie",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(
+                        text = displayTitle(recording),
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "${formatDate(recording.dateAdded)} · ${formatDuration(recording.durationMs)} · ${formatSize(recording.sizeBytes)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                IconButton(onClick = onShare) {
+                    Icon(Icons.Outlined.Share, contentDescription = "Udostępnij")
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        Icons.Outlined.DeleteOutline,
+                        contentDescription = "Usuń",
+                        tint = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            if (recording.waveform.isNotEmpty()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.GraphicEq,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = recording.waveform,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyRecordingsCard(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    body: String,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                modifier = Modifier.size(28.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    body,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+private fun recordingSummary(recordings: List<Recording>): String {
+    val count = recordings.size
+    val totalBytes = recordings.sumOf { it.sizeBytes }
+    val noun = if (count == 1) "nagranie" else "nagrań"
+    return "$count $noun · ${formatSize(totalBytes)} · OneDrive"
+}
+
+private fun displayTitle(recording: Recording): String {
+    val timestamp = timestampFromName(recording.name)
+    if (timestamp > 0L) {
+        return "Nagranie ${SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale.getDefault()).format(Date(timestamp))}"
+    }
+    return recording.name.substringBeforeLast('.').replace('_', ' ')
+}
+
+private fun timestampFromName(name: String): Long {
+    val match = Regex("^speech_(\\d{8})_(\\d{6})").find(name) ?: return 0L
+    return try {
+        SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).apply { isLenient = false }
+            .parse("${match.groupValues[1]}_${match.groupValues[2]}")
+            ?.time ?: 0L
+    } catch (_: Exception) {
+        0L
+    }
+}
+
+private fun formatDate(millis: Long): String =
+    if (millis > 0L) {
+        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(millis))
+    } else {
+        "Brak daty"
+    }
+
+private fun formatDuration(ms: Long): String {
+    val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
+    return if (totalSeconds >= 3600L) {
+        String.format(
+            Locale.getDefault(),
+            "%d:%02d:%02d",
+            totalSeconds / 3600L,
+            (totalSeconds % 3600L) / 60L,
+            totalSeconds % 60L,
+        )
+    } else {
+        String.format(Locale.getDefault(), "%d:%02d", totalSeconds / 60L, totalSeconds % 60L)
+    }
+}
+
+private fun formatSize(bytes: Long) = if (bytes < 1024L * 1024L) {
+    String.format(Locale.getDefault(), "%.1f KB", bytes / 1024.0)
+} else {
+    String.format(Locale.getDefault(), "%.1f MB", bytes / (1024.0 * 1024.0))
 }
