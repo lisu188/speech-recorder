@@ -10,8 +10,8 @@ android {
         applicationId = "pl.lisu188.speechrecorder"
         minSdk = 29
         targetSdk = 37
-        versionCode = 8
-        versionName = "1.4.2"
+        versionCode = 9
+        versionName = "1.5.0"
     }
 
     compileOptions {
@@ -30,7 +30,7 @@ android {
             initWith(getByName("release"))
             applicationIdSuffix = ".stable"
             matchingFallbacks += "release"
-            manifestPlaceholders["appLabel"] = "Dyktafon 1.4"
+            manifestPlaceholders["appLabel"] = "Dyktafon 1.5"
         }
     }
 
