@@ -240,7 +240,13 @@ object CloudFolderAccess {
 
     private fun liveFolder(context: Context, tree: Uri): Uri {
         synchronized(cacheLock) {
-            if (cachedTree == tree.toString()) cachedLiveFolder?.let { return it }
+            if (cachedTree == tree.toString()) {
+                cachedLiveFolder?.let { cached ->
+                    if (documentExists(context, cached)) return cached
+                    cachedLiveFolder = null
+                    cachedLiveChildren.clear()
+                }
+            }
         }
         val root = rootDocumentUri(tree)
         val existing = findChild(context, tree, root, INTERNAL_FOLDER_NAME)
