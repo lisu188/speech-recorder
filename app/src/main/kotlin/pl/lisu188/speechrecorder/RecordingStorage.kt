@@ -108,6 +108,12 @@ object RecordingStorage {
             .setRequiresCharging(true)
             .build()
 
+    internal fun remoteSizeMatches(expectedSize: Long, remoteSize: Long?): Boolean =
+        remoteSize != null && expectedSize >= 0L && remoteSize == expectedSize
+
+    internal fun <T> withArchiveLock(block: () -> T): T =
+        synchronized(archiveLock) { block() }
+
     fun enqueue(context: Context, file: File) {
         try {
             val work = OneTimeWorkRequestBuilder<RecordingPublishWorker>()
@@ -401,8 +407,8 @@ object RecordingStorage {
     }
 
     internal fun archiveOldRecordings(context: Context, nowMs: Long = System.currentTimeMillis()): Boolean =
-        synchronized(archiveLock) {
-            if (!CloudFolderAccess.hasAccess(context)) return@synchronized true
+        withArchiveLock {
+            if (!CloudFolderAccess.hasAccess(context)) return@withArchiveLock true
             val candidates = listPublished(context)
                 .filter { !it.archived && shouldArchive(it.name, it.lastModifiedMs, nowMs) }
                 .sortedBy { recordingTimestamp(it.name, it.lastModifiedMs) }
@@ -433,9 +439,8 @@ object RecordingStorage {
                 throw IOException("Archive input was incomplete")
             }
             val archivedBytes = countedOutput.bytesWritten
-            val remoteSize = CloudFolderAccess.fileSize(context, archiveUri)
-                ?: throw IOException("OneDrive did not report archive size")
-            if (archivedBytes <= 0L || remoteSize != archivedBytes) {
+            val remoteSize = awaitRemoteSize(context, archiveUri, archivedBytes)
+            if (archivedBytes <= 0L || !remoteSizeMatches(archivedBytes, remoteSize)) {
                 throw IOException("OneDrive archive size verification failed")
             }
             if (!CloudFolderAccess.delete(context, recording.uri)) {
@@ -501,7 +506,7 @@ object RecordingStorage {
             throw IOException("OneDrive write was incomplete")
         }
         val remoteSize = awaitRemoteSize(context, target, expectedSize)
-        if (remoteSize != expectedSize) {
+        if (!remoteSizeMatches(expectedSize, remoteSize)) {
             throw IOException("OneDrive file size verification failed")
         }
     }
