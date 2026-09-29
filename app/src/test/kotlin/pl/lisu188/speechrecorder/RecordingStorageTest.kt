@@ -37,6 +37,7 @@ class RecordingStorageTest {
         context = RuntimeEnvironment.getApplication()
         WorkManagerTestInitHelper.initializeTestWorkManager(context)
         File(context.noBackupFilesDir, "recordings").deleteRecursively()
+        File(context.noBackupFilesDir, "live-parts").deleteRecursively()
         context.getSharedPreferences("recorder", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("storage_settings", Context.MODE_PRIVATE).edit().clear().commit()
     }
