@@ -14,6 +14,10 @@ Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VA
 - 8 s ciszy kończy klip
 - dynamiczny próg szumu + energia + zero-crossing rate
 - foreground service z `START_STICKY`
+- częściowy wake lock podczas aktywnego nasłuchu
+- opcja bezpośredniego wyłączenia optymalizacji baterii dla aplikacji
+- nasłuch nie zatrzymuje się po usunięciu aplikacji z listy ostatnich
+- automatyczne wznowienie przy pierwszym otwarciu aplikacji po restarcie telefonu
 - trwały lokalny bufor awaryjny w prywatnym katalogu aplikacji
 - zapis nagrań do wybranego folderu OneDrive
 - przeglądarka nagrań czytająca bezpośrednio wybrany folder OneDrive
@@ -49,9 +53,15 @@ Na Androidzie 12 i starszym system nadal może wyświetlać wymagane powiadomien
 
 Kanał techniczny jest cichy, bez dźwięku, wibracji i badge'a.
 
-## Restart telefonu
+## Tryb always-on i restart telefonu
 
-Nowe wersje Androida ograniczają automatyczne uruchamianie mikrofonowego foreground service po restarcie. Wersja 1.5.0 nie publikuje osobnego powiadomienia z prośbą o wznowienie. Po restarcie należy otworzyć Dyktafon i wybrać **ROZPOCZNIJ**.
+Po ręcznym uruchomieniu nasłuchu aplikacja utrzymuje mikrofon jako `START_STICKY` foreground service i trzyma częściowy wake lock. Sticky foreground service może zostać odtworzony przez system po ubiciu procesu; ograniczenia Androida dotyczące uruchamiania FGS z tła nie blokują restartu już rozpoczętej sticky foreground service.
+
+W ustawieniach aplikacji jest przycisk **WYŁĄCZ OPTYMALIZACJĘ BATERII**. Dla możliwie ciągłej pracy należy zatwierdzić systemowy wyjątek.
+
+Android 14+ nie pozwala uruchomić foreground service typu `microphone` bezpośrednio z `BOOT_COMPLETED`. Po reboocie aplikacja zapamiętuje poprzedni stan. Przy pierwszym ręcznym otwarciu Dyktafonu nasłuch uruchomi się automatycznie, bez naciskania **ROZPOCZNIJ**.
+
+Nie istnieje zwykły mechanizm aplikacji, który pozwala zagwarantować nagrywanie po **Force stop**. Force stop blokuje usługę i odbiorniki aplikacji do czasu ponownego uruchomienia jej przez użytkownika. Odebranie uprawnienia mikrofonu albo ustawienie aplikacji jako systemowo **Restricted** również może przerwać działanie.
 
 ## Prywatność
 
@@ -87,8 +97,11 @@ Do aktualizacji istniejącej instalacji trzeba użyć dokładnie tego samego klu
 3. Sprawdź zakończenie klipu po 8 sekundach ciszy.
 4. Wyłącz sieć podczas klipu, a następnie przywróć połączenie i sprawdź, czy nagranie nie ginie.
 5. Przerwij proces aplikacji podczas aktywnego klipu i sprawdź odzyskanie WAV po kolejnym uruchomieniu.
-6. Sprawdź nasłuch z wygaszonym ekranem.
-7. Na Androidzie 13+ sprawdź brak stałego wpisu Dyktafonu w zwykłej liście powiadomień oraz obecność usługi w systemowym widoku aktywnych aplikacji.
+6. Wyłącz optymalizację baterii w ustawieniach Dyktafonu i sprawdź nasłuch przez kilka godzin z wygaszonym ekranem.
+7. Usuń aplikację z listy ostatnich i sprawdź, że nasłuch nadal działa.
+8. Ubij proces poleceniem ADB bez Force stop i sprawdź odtworzenie sticky service.
+9. Zrestartuj telefon, otwórz Dyktafon i sprawdź automatyczne wznowienie bez naciskania ROZPOCZNIJ.
+10. Na Androidzie 13+ sprawdź brak stałego wpisu Dyktafonu w zwykłej liście powiadomień oraz obecność usługi w systemowym widoku aktywnych aplikacji.
 
 Dokumentacja platformy:
 
