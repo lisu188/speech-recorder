@@ -360,6 +360,7 @@ object RecordingStorage {
                 writeCommitReceipt(context, marker, expectedSize)
             }
             CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(wavFile.name))
+            CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(wavFile.name))
             liveDirectory(context).listFiles().orEmpty()
                 .filter { it.name.startsWith(livePrefix(wavFile.name)) }
                 .forEach { it.delete() }
@@ -386,9 +387,11 @@ object RecordingStorage {
                 }
                 if (CloudFolderAccess.liveExists(context, marker)) {
                     CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(finalName))
+                    CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(finalName))
                 }
             } else {
                 CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(finalName))
+                CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(finalName))
             }
             if (!file.delete()) throw IOException("Unable to remove uploaded live part")
             true
@@ -440,6 +443,7 @@ object RecordingStorage {
             }
             CloudFolderAccess.deleteLiveExact(context, commitMarkerName(recording.name))
             CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(recording.name))
+            CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(recording.name))
             true
         } catch (_: Exception) {
             false
@@ -496,8 +500,7 @@ object RecordingStorage {
         if (written != expectedSize) {
             throw IOException("OneDrive write was incomplete")
         }
-        val remoteSize = CloudFolderAccess.fileSize(context, target)
-            ?: throw IOException("OneDrive did not report file size")
+        val remoteSize = awaitRemoteSize(context, target, expectedSize)
         if (remoteSize != expectedSize) {
             throw IOException("OneDrive file size verification failed")
         }
@@ -507,6 +510,22 @@ object RecordingStorage {
         val payload = expectedSize.toString().toByteArray(Charsets.US_ASCII)
         val target = CloudFolderAccess.openOrCreateLiveFile(context, markerName, "application/octet-stream")
         payload.inputStream().use { input -> copyAndVerify(context, target, input, payload.size.toLong()) }
+    }
+
+    private fun awaitRemoteSize(context: Context, target: Uri, expectedSize: Long): Long? {
+        repeat(4) { attempt ->
+            val size = CloudFolderAccess.fileSize(context, target)
+            if (size == expectedSize) return size
+            if (attempt < 3) {
+                try {
+                    Thread.sleep(100L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return size
+                }
+            }
+        }
+        return CloudFolderAccess.fileSize(context, target)
     }
 
     private class CountingOutputStream(output: OutputStream) : FilterOutputStream(output) {
