@@ -15,6 +15,7 @@ object CloudFolderAccess {
         val name: String,
         val sizeBytes: Long,
         val lastModifiedMs: Long,
+        val archived: Boolean,
     )
 
     fun load(context: Context): Uri? {
@@ -83,10 +84,7 @@ object CloudFolderAccess {
 
     fun listAudio(context: Context): List<DocumentInfo> {
         val tree = load(context) ?: return emptyList()
-        val children = DocumentsContract.buildChildDocumentsUriUsingTree(
-            tree,
-            DocumentsContract.getTreeDocumentId(tree),
-        )
+        val children = childrenUri(tree)
         val projection = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
@@ -103,16 +101,18 @@ object CloudFolderAccess {
             buildList {
                 while (cursor.moveToNext()) {
                     val name = cursor.getString(nameColumn) ?: continue
+                    if (name.startsWith(INTERNAL_PREFIX)) continue
                     val mime = cursor.getString(mimeColumn).orEmpty()
-                    if (!name.endsWith(".wav", ignoreCase = true) && mime != "audio/wav" && mime != "audio/x-wav") {
-                        continue
-                    }
+                    val archived = name.endsWith(".wav.zip", ignoreCase = true)
+                    val wav = name.endsWith(".wav", ignoreCase = true) || mime == "audio/wav" || mime == "audio/x-wav"
+                    if (!wav && !archived) continue
                     add(
                         DocumentInfo(
                             uri = DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(idColumn)),
                             name = name,
                             sizeBytes = if (cursor.isNull(sizeColumn)) 0L else cursor.getLong(sizeColumn),
                             lastModifiedMs = if (cursor.isNull(modifiedColumn)) 0L else cursor.getLong(modifiedColumn),
+                            archived = archived,
                         ),
                     )
                 }
@@ -120,16 +120,23 @@ object CloudFolderAccess {
         }.orEmpty()
     }
 
-    fun openOrCreateAudio(context: Context, name: String): Uri {
+    fun openOrCreateAudio(context: Context, name: String): Uri =
+        openOrCreateFile(context, name, "audio/wav")
+
+    fun openOrCreateFile(context: Context, name: String, mimeType: String): Uri {
         val tree = load(context) ?: throw IOException("OneDrive folder is not configured")
         findChild(context, tree, name)?.let { return it }
-        val root = rootDocumentUri(tree)
         return DocumentsContract.createDocument(
             context.contentResolver,
-            root,
-            "audio/wav",
+            rootDocumentUri(tree),
+            mimeType,
             name,
-        ) ?: throw IOException("OneDrive provider refused to create the recording")
+        ) ?: throw IOException("OneDrive provider refused to create $name")
+    }
+
+    fun exists(context: Context, name: String): Boolean {
+        val tree = load(context) ?: return false
+        return findChild(context, tree, name) != null
     }
 
     fun delete(context: Context, uri: Uri): Boolean =
@@ -139,11 +146,34 @@ object CloudFolderAccess {
             false
         }
 
+    fun deleteByPrefix(context: Context, prefix: String): Int {
+        val tree = load(context) ?: return 0
+        var deleted = 0
+        val children = childrenUri(tree)
+        context.contentResolver.query(
+            children,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            ),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(nameColumn) ?: continue
+                if (!name.startsWith(prefix)) continue
+                val uri = DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(idColumn))
+                if (delete(context, uri)) deleted++
+            }
+        }
+        return deleted
+    }
+
     private fun findChild(context: Context, tree: Uri, name: String): Uri? {
-        val children = DocumentsContract.buildChildDocumentsUriUsingTree(
-            tree,
-            DocumentsContract.getTreeDocumentId(tree),
-        )
+        val children = childrenUri(tree)
         context.contentResolver.query(
             children,
             arrayOf(
@@ -165,6 +195,11 @@ object CloudFolderAccess {
         return null
     }
 
+    private fun childrenUri(tree: Uri): Uri = DocumentsContract.buildChildDocumentsUriUsingTree(
+        tree,
+        DocumentsContract.getTreeDocumentId(tree),
+    )
+
     private fun rootDocumentUri(tree: Uri): Uri = DocumentsContract.buildDocumentUriUsingTree(
         tree,
         DocumentsContract.getTreeDocumentId(tree),
@@ -179,4 +214,6 @@ object CloudFolderAccess {
         } catch (_: SecurityException) {
         }
     }
+
+    private const val INTERNAL_PREFIX = "__sr_"
 }
