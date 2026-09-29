@@ -342,7 +342,7 @@ class RecordingsActivity : Activity() {
 
     private fun deleteRecording(recording: Recording) {
         if (playingUri == recording.uri) stopPlayback()
-        if (RecordingStorage.deletePublished(this, recording.uri)) {
+        if (RecordingStorage.deletePublished(this, recording.uri, recording.name)) {
             Toast.makeText(this, "Nagranie usunięte z OneDrive", Toast.LENGTH_SHORT).show()
             loadRecordings()
         } else {
