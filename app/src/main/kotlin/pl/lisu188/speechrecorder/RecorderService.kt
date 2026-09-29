@@ -340,7 +340,7 @@ class RecorderService : Service() {
                     liveMirror?.close()
                     liveMirror = null
                     sink = null
-                    RecordingStorage.enqueue(this, completed)
+                    RecordingStorage.enqueueCompleted(this, completed)
                     silenceFrames = 0
                     consecutiveSpeechFrames = 0
                     clipFrames = 0
@@ -361,7 +361,7 @@ class RecorderService : Service() {
                 try {
                     liveMirror?.close()
                     liveMirror = null
-                    RecordingStorage.enqueue(this, it.closeAndGetFile())
+                    RecordingStorage.enqueueCompleted(this, it.closeAndGetFile())
                 } catch (_: Exception) {
                 }
             }
