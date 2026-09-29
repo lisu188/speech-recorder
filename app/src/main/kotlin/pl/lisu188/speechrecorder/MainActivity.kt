@@ -56,7 +56,11 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
         RecordingStorage.recover(this)
-        if (intent.action == ACTION_RESUME_AFTER_BOOT) requestAndStart()
+        val resumeAfterBoot = prefs().getBoolean(BootReceiver.KEY_RESUME_AFTER_BOOT, false)
+        if (intent.action == ACTION_RESUME_AFTER_BOOT || resumeAfterBoot) {
+            prefs().edit().remove(BootReceiver.KEY_RESUME_AFTER_BOOT).remove("capture_error").apply()
+            requestAndStart()
+        }
     }
 
     override fun onResume() {
