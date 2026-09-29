@@ -4,10 +4,8 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.IntentFilter
-import android.content.ContentUris
 import android.content.Intent
-import android.database.Cursor
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
@@ -16,7 +14,6 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.MediaStore
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
@@ -34,6 +31,7 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import java.io.FileInputStream
 import java.text.DateFormat
+import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -73,8 +71,12 @@ class RecordingsActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (!libraryReceiverRegistered) {
-            ContextCompat.registerReceiver(this, libraryReceiver,
-                IntentFilter(RecordingStorage.ACTION_LIBRARY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+            ContextCompat.registerReceiver(
+                this,
+                libraryReceiver,
+                IntentFilter(RecordingStorage.ACTION_LIBRARY_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
             libraryReceiverRegistered = true
         }
         if (::adapter.isInitialized) loadRecordings()
@@ -114,13 +116,16 @@ class RecordingsActivity : Activity() {
             setPadding(0, dp(4), 0, dp(14))
         }
         content.addView(summary, matchWrap())
-        content.addView(Button(this).apply {
-            text = "ODŚWIEŻ NAGRANIA"
-            setOnClickListener { loadRecordings() }
-        }, matchWrap())
+        content.addView(
+            Button(this).apply {
+                text = "ODŚWIEŻ ONEDRIVE"
+                setOnClickListener { loadRecordings() }
+            },
+            matchWrap(),
+        )
 
         search = EditText(this).apply {
-            hint = "Szukaj w nazwach i transkrypcjach"
+            hint = "Szukaj w nazwach nagrań"
             isSingleLine = true
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
@@ -170,10 +175,28 @@ class RecordingsActivity : Activity() {
     private fun loadRecordings() {
         val generation = ++loadGeneration
         loadTask?.cancel(true)
-        summary.text = "Wczytywanie nagrań…"
+        if (!CloudFolderAccess.hasAccess(this)) {
+            recordings.clear()
+            visible.clear()
+            summary.text = "Wybierz folder OneDrive w Ustawieniach"
+            adapter.notifyDataSetChanged()
+            return
+        }
+
+        summary.text = "Wczytywanie z OneDrive…"
         loadTask = loadExecutor.submit {
             try {
-                val loaded = queryRecordings()
+                val loaded = RecordingStorage.listPublished(this).map { stored ->
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                    Recording(
+                        uri = stored.uri,
+                        name = stored.name,
+                        dateAdded = stored.lastModifiedMs.takeIf { it > 0L } ?: timestampFromName(stored.name),
+                        sizeBytes = stored.sizeBytes,
+                        durationMs = readDuration(stored.uri),
+                        waveform = buildWaveform(stored.uri, stored.sizeBytes),
+                    )
+                }
                 runOnUiThread {
                     if (generation == loadGeneration && !isDestroyed) {
                         recordings.clear()
@@ -185,65 +208,15 @@ class RecordingsActivity : Activity() {
                 runOnUiThread {
                     if (generation == loadGeneration && !isDestroyed) {
                         applyFilterAndSort()
-                        Toast.makeText(this, "Nie udało się odczytać nagrań", Toast.LENGTH_LONG).show()
+                        Toast.makeText(
+                            this,
+                            "Nie udało się odczytać OneDrive. Sprawdź połączenie i dostęp do folderu.",
+                            Toast.LENGTH_LONG,
+                        ).show()
                     }
                 }
             }
         }
-    }
-
-    private fun queryRecordings(): List<Recording> {
-        val documents = TranscriptStore(this).loadDocuments()
-        val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-        val projection = arrayOf(
-            MediaStore.Audio.Media._ID,
-            MediaStore.Audio.Media.DISPLAY_NAME,
-            MediaStore.Audio.Media.DATE_ADDED,
-            MediaStore.Audio.Media.SIZE,
-            MediaStore.Audio.Media.DURATION,
-        )
-
-        return contentResolver.query(
-                collection,
-                projection,
-                "${MediaStore.Audio.Media.RELATIVE_PATH}=? AND ${MediaStore.Audio.Media.IS_PENDING}=0",
-                arrayOf(TranscriptStore.RELATIVE_PATH_QUERY),
-                null,
-            )?.use { cursor -> readRecordings(cursor, collection, documents) }.orEmpty()
-    }
-
-    private fun readRecordings(
-        cursor: Cursor,
-        collection: Uri,
-        documents: Map<String, TranscriptStore.TranscriptDocument>,
-    ): List<Recording> {
-        val loaded = mutableListOf<Recording>()
-        val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-        val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
-        val dateColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
-        val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
-        val durationColumn = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
-
-        while (cursor.moveToNext()) {
-            if (Thread.currentThread().isInterrupted) throw InterruptedException()
-            val uri = ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
-            val name = cursor.getString(nameColumn)
-            if (!name.endsWith(".wav", ignoreCase = true)) continue
-            val duration = cursor.getLong(durationColumn).takeIf { it > 0L } ?: readDuration(uri)
-            val transcript = documents[name.substringBeforeLast('.')]
-            loaded += Recording(
-                uri = uri,
-                name = name,
-                dateAdded = cursor.getLong(dateColumn) * 1000L,
-                sizeBytes = cursor.getLong(sizeColumn),
-                durationMs = duration,
-                waveform = buildWaveform(uri),
-                transcriptUri = transcript?.uri,
-                transcriptText = transcript?.text.orEmpty(),
-                transcriptSummary = transcript?.summary.orEmpty(),
-            )
-        }
-        return loaded
     }
 
     private fun applyFilterAndSort() {
@@ -254,8 +227,6 @@ class RecordingsActivity : Activity() {
             query.isEmpty() ||
                 recording.name.lowercase(Locale.getDefault()).contains(query) ||
                 displayTitle(recording).lowercase(Locale.getDefault()).contains(query) ||
-                recording.transcriptSummary.lowercase(Locale.getDefault()).contains(query) ||
-                recording.transcriptText.lowercase(Locale.getDefault()).contains(query) ||
                 formatDate(recording.dateAdded).lowercase(Locale.getDefault()).contains(query)
         }
 
@@ -267,8 +238,7 @@ class RecordingsActivity : Activity() {
         }
 
         val totalBytes = visible.sumOf { it.sizeBytes }
-        val transcripts = visible.count { it.transcriptUri != null }
-        summary.text = "${visible.size}${if (visible.size == 1) " nagranie" else " nagrań"}  •  $transcripts tekstów  •  ${formatSize(totalBytes)}"
+        summary.text = "${visible.size}${if (visible.size == 1) " nagranie" else " nagrań"}  •  ${formatSize(totalBytes)}  •  OneDrive"
         adapter.notifyDataSetChanged()
     }
 
@@ -284,22 +254,27 @@ class RecordingsActivity : Activity() {
         }
     }
 
-    private fun buildWaveform(uri: Uri): String {
+    private fun buildWaveform(uri: Uri, knownSize: Long): String {
         val result = StringBuilder()
         return try {
             contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
-                if (afd.length <= 80L) return ""
+                val totalLength = afd.length.takeIf { it > 44L } ?: knownSize
+                if (totalLength <= 80L) return ""
                 FileInputStream(afd.fileDescriptor).use { input ->
                     val channel = input.channel
-                    val dataLength = (afd.length - 44L).coerceAtLeast(1L)
+                    val dataLength = (totalLength - 44L).coerceAtLeast(1L)
                     val buffer = ByteArray(768)
                     repeat(WAVEFORM_BARS) { index ->
                         channel.position(afd.startOffset + 44L + dataLength * index / WAVEFORM_BARS)
                         val read = input.read(buffer)
+                        if (read <= 0) return@repeat
                         var maxSample = 0
                         var position = 0
                         while (position + 1 < read) {
-                            val sample = ((buffer[position].toInt() and 0xff) or (buffer[position + 1].toInt() shl 8)).toShort().toInt()
+                            val sample = (
+                                (buffer[position].toInt() and 0xff) or
+                                    (buffer[position + 1].toInt() shl 8)
+                                ).toShort().toInt()
                             maxSample = maxOf(maxSample, abs(sample))
                             position += 2
                         }
@@ -339,20 +314,8 @@ class RecordingsActivity : Activity() {
             adapter.notifyDataSetChanged()
         } catch (_: Exception) {
             stopPlayback()
-            Toast.makeText(this, "Nie udało się odtworzyć nagrania", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Nie udało się odtworzyć nagrania z OneDrive", Toast.LENGTH_LONG).show()
         }
-    }
-
-    private fun showTranscript(recording: Recording) {
-        if (recording.transcriptText.isBlank()) {
-            Toast.makeText(this, "Transkrypcja nie jest jeszcze dostępna", Toast.LENGTH_SHORT).show()
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle(displayTitle(recording))
-            .setMessage(recording.transcriptText)
-            .setPositiveButton("Zamknij", null)
-            .show()
     }
 
     private fun shareRecording(recording: Recording) {
@@ -370,14 +333,8 @@ class RecordingsActivity : Activity() {
 
     private fun confirmDelete(recording: Recording) {
         AlertDialog.Builder(this)
-            .setTitle("Usunąć nagranie?")
-            .setMessage(
-                if (recording.transcriptUri != null) {
-                    "${displayTitle(recording)}\n\nUsunięty zostanie również powiązany plik transkrypcji."
-                } else {
-                    displayTitle(recording)
-                },
-            )
+            .setTitle("Usunąć nagranie z OneDrive?")
+            .setMessage(displayTitle(recording))
             .setNegativeButton("Anuluj", null)
             .setPositiveButton("Usuń") { _, _ -> deleteRecording(recording) }
             .show()
@@ -385,21 +342,11 @@ class RecordingsActivity : Activity() {
 
     private fun deleteRecording(recording: Recording) {
         if (playingUri == recording.uri) stopPlayback()
-        try {
-            if (contentResolver.delete(recording.uri, null, null) > 0) {
-                recording.transcriptUri?.let { transcriptUri ->
-                    try {
-                        TranscriptStore(this).deleteTranscript(transcriptUri)
-                    } catch (_: Exception) {
-                    }
-                }
-                Toast.makeText(this, "Nagranie usunięte", Toast.LENGTH_SHORT).show()
-                loadRecordings()
-            } else {
-                Toast.makeText(this, "Nie udało się usunąć nagrania", Toast.LENGTH_LONG).show()
-            }
-        } catch (_: Exception) {
-            Toast.makeText(this, "Android nie pozwolił usunąć tego nagrania", Toast.LENGTH_LONG).show()
+        if (RecordingStorage.deletePublished(this, recording.uri)) {
+            Toast.makeText(this, "Nagranie usunięte z OneDrive", Toast.LENGTH_SHORT).show()
+            loadRecordings()
+        } else {
+            Toast.makeText(this, "Nie udało się usunąć nagrania z OneDrive", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -417,21 +364,30 @@ class RecordingsActivity : Activity() {
     }
 
     private fun displayTitle(recording: Recording): String {
-        val baseName = recording.name.substringBeforeLast('.')
-        val semanticTitle = Regex("^\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}_(.+)$")
-            .find(baseName)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.replace('_', ' ')
-            ?.trim()
-        return semanticTitle?.takeIf { it.isNotBlank() }
-            ?: baseName.replace('_', ' ')
+        val timestamp = timestampFromName(recording.name)
+        if (timestamp > 0L) {
+            return "Nagranie ${SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale.getDefault()).format(Date(timestamp))}"
+        }
+        return recording.name.substringBeforeLast('.').replace('_', ' ')
     }
 
-    private fun formatDate(millis: Long) = DateFormat.getDateTimeInstance(
-        DateFormat.MEDIUM,
-        DateFormat.SHORT,
-    ).format(Date(millis))
+    private fun timestampFromName(name: String): Long {
+        val match = Regex("^speech_(\\d{8})_(\\d{6})").find(name) ?: return 0L
+        return try {
+            SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).apply { isLenient = false }
+                .parse("${match.groupValues[1]}_${match.groupValues[2]}")
+                ?.time ?: 0L
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    private fun formatDate(millis: Long): String =
+        if (millis > 0L) {
+            DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(millis))
+        } else {
+            "Brak daty"
+        }
 
     private fun formatDuration(ms: Long): String {
         val totalSeconds = (ms / 1000L).coerceAtLeast(0L)
@@ -514,15 +470,6 @@ class RecordingsActivity : Activity() {
                                         matchWrap(),
                                     )
                                 }
-                                if (recording.transcriptSummary.isNotBlank()) {
-                                    addView(
-                                        textView(recording.transcriptSummary, 13, Color.LTGRAY).apply {
-                                            maxLines = 2
-                                            setPadding(0, dp(4), 0, 0)
-                                        },
-                                        matchWrap(),
-                                    )
-                                }
                             },
                             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
                         )
@@ -537,22 +484,11 @@ class RecordingsActivity : Activity() {
                         setPadding(dp(58), dp(6), 0, 0)
                         addView(
                             Button(this@RecordingsActivity).apply {
-                                text = "TEKST"
-                                textSize = 11f
-                                isEnabled = recording.transcriptUri != null
-                                setOnClickListener { showTranscript(recording) }
-                            },
-                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
-                        )
-                        addView(
-                            Button(this@RecordingsActivity).apply {
                                 text = "UDOSTĘPNIJ"
                                 textSize = 11f
                                 setOnClickListener { shareRecording(recording) }
                             },
-                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                                leftMargin = dp(6)
-                            },
+                            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
                         )
                         addView(
                             Button(this@RecordingsActivity).apply {
@@ -578,9 +514,6 @@ class RecordingsActivity : Activity() {
         val sizeBytes: Long,
         val durationMs: Long,
         val waveform: String,
-        val transcriptUri: Uri?,
-        val transcriptText: String,
-        val transcriptSummary: String,
     )
 
     private companion object {
