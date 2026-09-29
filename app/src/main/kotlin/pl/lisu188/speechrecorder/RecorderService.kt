@@ -134,6 +134,7 @@ class RecorderService : Service() {
             .setContentTitle("Dyktafon działa w tle")
             .setContentText(if (speechActive) "Nagrywanie mowy" else "Nasłuchiwanie mikrofonu")
             .setOngoing(true)
+            .setSilent(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setCategory(Notification.CATEGORY_SERVICE)
@@ -150,9 +151,9 @@ class RecorderService : Service() {
             NotificationChannel(
                 CHANNEL_ID,
                 "Nagrywanie w tle",
-                NotificationManager.IMPORTANCE_LOW,
+                NotificationManager.IMPORTANCE_MIN,
             ).apply {
-                description = "Techniczny kanał wymagany przez Android dla dostępu do mikrofonu w tle"
+                description = "Minimalny techniczny kanał wymagany przez Android dla ciągłego dostępu do mikrofonu"
                 setSound(null, null)
                 enableVibration(false)
                 setShowBadge(false)

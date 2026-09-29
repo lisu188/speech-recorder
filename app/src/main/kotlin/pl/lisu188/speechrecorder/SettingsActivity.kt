@@ -91,7 +91,7 @@ class SettingsActivity : Activity() {
         addSection(
             content,
             "Działanie w tle",
-            "Ciągły dostęp do mikrofonu wymaga foreground service. Na Androidzie 13+ aplikacja nie prosi o zgodę na zwykłe powiadomienia, więc komunikat usługi nie jest pokazywany w panelu powiadomień; Android nadal pokazuje aktywną usługę w systemowym widoku aktywnych aplikacji. Na starszych wersjach Androida stałe powiadomienie usługi może być widoczne.",
+            "Ciągły dostęp do mikrofonu wymaga foreground service. Aplikacja nie deklaruje POST_NOTIFICATIONS, a kanał techniczny ma minimalną ważność, bez dźwięku, wibracji i badge’a. Na Androidzie 13+ wpis nie trafia do zwykłego panelu powiadomień, ale system nadal pokazuje usługę w widoku Aktywne aplikacje. Na starszych wersjach Androida system może nadal pokazywać stałą ikonę lub powiadomienie — tego nie da się usunąć bez rezygnacji z ciągłego działania.",
         )
 
         content.addView(
