@@ -2,7 +2,7 @@
 
 Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VAD działają lokalnie jako foreground service. Zakończone klipy są zapisywane do folderu wybranego w OneDrive przez systemowy Storage Access Framework.
 
-## Wersja 1.7.0
+## Wersja 1.7.1
 
 - Kotlin 2.4.10
 - Android Gradle Plugin 9.3.2
@@ -19,11 +19,14 @@ Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VA
 - nasłuch nie zatrzymuje się po usunięciu aplikacji z listy ostatnich
 - automatyczne wznowienie przy pierwszym otwarciu aplikacji po restarcie telefonu
 - trwały lokalny bufor awaryjny w prywatnym katalogu aplikacji
+- odzyskiwanie pomija aktywne pliki z blokadą i naprawia nagłówki zamkniętych WAV
+- jawny stan przerwania, gdy Android wyciszy mikrofon na rzecz innej aplikacji lub rozmowy
+- awaria fragmentów bezpieczeństwa nie blokuje zamknięcia głównego WAV
 - zapis nagrań do wybranego folderu OneDrive
 - podczas aktywnego klipu poprawne 15-sekundowe WAV-y bezpieczeństwa są zapisywane w wewnętrznym folderze OneDrive `__sr_live`
-- pełny WAV jest uznawany za poprawnie zapisany dopiero po weryfikacji jego rozmiaru i utworzeniu receipt
+- pełny WAV jest uznawany za poprawnie zapisany dopiero po odczycie i sprawdzeniu receipt oraz ponownej weryfikacji finalnego dokumentu
 - techniczne fragmenty live są usuwane wyłącznie po potwierdzonym finalnym zapisie
-- WAV-y starsze niż 30 dni są automatycznie kompresowane lossless do `.wav.zip` na OneDrive podczas ładowania telefonu
+- WAV-y starsze niż 30 dni są automatycznie kompresowane lossless do `.wav.zip` na OneDrive podczas ładowania telefonu; źródło jest usuwane dopiero po pobraniu i sprawdzeniu zawartości archiwum
 - przeglądarka nagrań czytająca bezpośrednio wybrany folder OneDrive
 - odtwarzanie, mini-waveformy, udostępnianie i usuwanie nagrań
 - migracja wcześniejszych WAV z `Music/SpeechRecorder` po skonfigurowaniu OneDrive
@@ -64,7 +67,7 @@ Aplikacja zapamiętuje persistowalne uprawnienie do wybranego drzewa dokumentów
 
 Aktywny klip jest zapisywany w trwałym prywatnym katalogu aplikacji. Równolegle aplikacja zamyka co 15 sekund poprawny techniczny fragment WAV i natychmiast przekazuje go do providera OneDrive w dedykowanej szeregowej kolejce I/O. WorkManager służy jako fallback po błędzie oraz do odzyskiwania plików po restarcie procesu. Fragmenty trafiają do wewnętrznego podfolderu `__sr_live`, dzięki czemu nie wymagają wielokrotnego skanowania całej biblioteki nagrań.
 
-Po zamknięciu rozmowy aplikacja zapisuje pełny WAV w głównym folderze OneDrive i sprawdza rozmiar pliku raportowany przez provider. Dopiero po zgodności rozmiaru zapisuje osobny receipt `commit_*.ok` w `__sr_live`. Sam fakt istnienia pliku WAV nie jest traktowany jako sukces, więc pusty lub częściowo utworzony dokument po przerwanym uploadzie nie może spowodować skasowania fragmentów bezpieczeństwa. Dopiero receipt pozwala usunąć części live i lokalną kopię pełnego WAV. Faktyczny moment wysłania danych z providera do serwerów Microsoft nadal zależy od klienta OneDrive.
+Po zamknięciu rozmowy aplikacja zapisuje pełny WAV w głównym folderze OneDrive i sprawdza rozmiar pliku raportowany przez provider. Dopiero po zgodności rozmiaru zapisuje osobny receipt `commit_*.ok` w `__sr_live`. Sam fakt istnienia pliku WAV nie jest traktowany jako sukces, więc pusty lub częściowo utworzony dokument po przerwanym uploadzie nie może spowodować skasowania fragmentów bezpieczeństwa. Aplikacja odczytuje zawartość receipt i sprawdza zapisany rozmiar oraz tożsamość finalnego dokumentu. Pusty, niekompletny albo niezgodny receipt nie pozwala usunąć lokalnej kopii. Zapis, odzyskiwanie, archiwizacja i usuwanie tego samego nagrania są synchronizowane, a operacje zachowują tożsamość wybranego folderu podczas całej transakcji. Faktyczny moment wysłania danych z providera do serwerów Microsoft nadal zależy od klienta OneDrive.
 
 Jeżeli OneDrive jest niedostępny, uprawnienie do folderu wygasło albo provider zwróci błąd, lokalna kopia pozostaje na urządzeniu i zapis jest ponawiany. Po ponownym otwarciu aplikacji osierocone nagrania są odzyskiwane, naprawiany jest nagłówek WAV i zadanie jest ponownie kolejkowane.
 
@@ -72,7 +75,7 @@ Po wybraniu folderu OneDrive aplikacja próbuje również przenieść wcześniej
 
 ## Kompresja starszych nagrań
 
-WorkManager przegląda starsze WAV-y okresowo, ale archiwizacja może rozpocząć się tylko podczas ładowania urządzenia. Wiek nagrania jest wyznaczany najpierw z daty w nazwie `speech_YYYYMMDD_HHMMSS...`; `lastModified` z OneDrive jest używany wyłącznie jako fallback dla starych nazw. Pliki mające co najmniej 30 dni są strumieniowo pakowane do ZIP/DEFLATE z domyślnym poziomem kompresji, aby ograniczyć obciążenie CPU. Archiwizacja jest dodatkowo serializowana, więc worker okresowy i natychmiastowy nie mogą jednocześnie pisać tego samego ZIP-a. Źródłowy WAV jest usuwany dopiero po sprawdzeniu kompletności wejścia i zgodności rozmiaru gotowego archiwum zgłoszonego przez provider. Jedno uruchomienie archiwizuje maksymalnie osiem plików.
+WorkManager przegląda starsze WAV-y okresowo, ale archiwizacja może rozpocząć się tylko podczas ładowania urządzenia. Wiek nagrania jest wyznaczany najpierw z daty w nazwie `speech_YYYYMMDD_HHMMSS...`; `lastModified` z OneDrive jest używany wyłącznie jako fallback dla starych nazw. Pliki mające co najmniej 30 dni są strumieniowo pakowane do ZIP/DEFLATE z domyślnym poziomem kompresji, aby ograniczyć obciążenie CPU. Archiwizacja jest dodatkowo serializowana, więc worker okresowy i natychmiastowy nie mogą jednocześnie pisać tego samego ZIP-a. Źródłowy WAV jest usuwany dopiero po sprawdzeniu kompletności wejścia, pobraniu gotowego ZIP-a, sprawdzeniu pojedynczego wpisu i porównaniu SHA-256 rozpakowanego audio z wejściem. Przed usunięciem aplikacja ponownie sprawdza metadane źródła. Dokumenty niekompletne, o nieznanym rozmiarze lub nadal oczekujące lokalnie na publikację są pomijane i zachowywane. Jedno uruchomienie archiwizuje maksymalnie osiem plików.
 
 Archiwa `.wav.zip` pozostają na OneDrive i są celowo pomijane przez ekran **Nagrania**. Do odsłuchu starszego archiwum należy rozpakować WAV w OneDrive lub innym menedżerze plików.
 
@@ -98,7 +101,7 @@ Nie istnieje zwykły mechanizm aplikacji, który pozwala zagwarantować nagrywan
 
 ## Prywatność
 
-Wersja 1.7.0 nie zawiera integracji OpenAI. Usunięto:
+Wersja 1.7.1 nie zawiera integracji OpenAI. Usunięto:
 
 - klienta OpenAI,
 - przechowywanie klucza API,
@@ -121,7 +124,9 @@ Wariant `standalone` (`pl.lisu188.speechrecorder.stable`) zachowuje certyfikat S
 
 `afe1498136f756801c385653c7f34f1597a423da437398895f6a9d6c710d03a5`
 
-Do aktualizacji istniejącej instalacji trzeba użyć dokładnie tego samego klucza. Skrypt `scripts/sign-apk.sh` weryfikuje fingerprint przed wystawieniem APK.
+Do aktualizacji istniejącej instalacji trzeba użyć dokładnie tego samego klucza. Skrypt `scripts/sign-apk.sh` weryfikuje fingerprint przed wystawieniem APK. Skrypt `scripts/test-sign-apk.sh` sprawdza negatywne ścieżki podpisywania na sztucznych danych.
+
+Push do `main` i pull request uruchamiają testy, lint i build; ich niepodpisane APK są wyłącznie wejściem do podpisywania. Instalowalne APK powstają w osobnym jobie `signed-delivery`, uruchamianym przez tag `v*` lub ręczne uruchomienie workflow z `require_signed_delivery=true` (wartość domyślna). Job wymaga dla obu wariantów czterech sekretów o prefiksie `RELEASE_` lub `STANDALONE_`: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`. Brak któregokolwiek sekretu lub niezgodny certyfikat kończy wysyłkę błędem. Oba warianty muszą przejść weryfikację przed opublikowaniem podpisanych artefaktów i plików SHA-256. Klucze zastępcze nie są generowane.
 
 ## Sprawdzenie na telefonie
 
@@ -136,7 +141,10 @@ Do aktualizacji istniejącej instalacji trzeba użyć dokładnie tego samego klu
 9. Ubij proces poleceniem ADB bez Force stop i sprawdź odtworzenie sticky service.
 10. Zrestartuj telefon, otwórz Dyktafon i sprawdź automatyczne wznowienie bez naciskania ROZPOCZNIJ.
 11. W testowym folderze umieść WAV starszy niż 30 dni, podłącz telefon do ładowania i sprawdź utworzenie `.wav.zip` oraz usunięcie źródłowego WAV dopiero po zweryfikowaniu archiwum.
-12. Na Androidzie 13+ sprawdź brak stałego wpisu Dyktafonu w zwykłej liście powiadomień oraz obecność usługi w systemowym widoku aktywnych aplikacji.
+12. Rozpocznij nagrywanie w innej aplikacji albo rozmowę telefoniczną i sprawdź stan wyciszenia mikrofonu oraz powrót do nasłuchu po zwolnieniu mikrofonu.
+13. Otwórz aplikację podczas aktywnego fragmentu live i sprawdź, że odzyskiwanie nie usuwa pliku przed jego zamknięciem.
+14. Przy wolnym providerze sprawdź, że odtwarzanie, usuwanie i otwieranie Ustawień nie blokują nawigacji.
+15. Na Androidzie 13+ sprawdź brak stałego wpisu Dyktafonu w zwykłej liście powiadomień oraz obecność usługi w systemowym widoku aktywnych aplikacji.
 
 Dokumentacja platformy:
 

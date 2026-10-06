@@ -3,8 +3,10 @@ package pl.lisu188.speechrecorder
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.PowerManager
 import android.provider.Settings
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -44,9 +46,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 
 class SettingsActivity : ComponentActivity() {
     private val screenState = mutableStateOf(SettingsScreenState())
+    private val folderExecutor = Executors.newSingleThreadExecutor()
+    private var folderTask: Future<*>? = null
+    private var folderCancellation: CancellationSignal? = null
+    private var folderGeneration = 0
+    private var uiDestroyed = false
 
     private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { saveFolder(it) }
@@ -75,12 +84,23 @@ class SettingsActivity : ComponentActivity() {
                 }
             }
         }
-        refreshState()
     }
 
     override fun onResume() {
         super.onResume()
         refreshState()
+    }
+
+    override fun onPause() {
+        cancelFolderRefresh()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        uiDestroyed = true
+        cancelFolderRefresh()
+        folderExecutor.shutdownNow()
+        super.onDestroy()
     }
 
     private fun saveFolder(uri: Uri) {
@@ -136,13 +156,52 @@ class SettingsActivity : ComponentActivity() {
     }
 
     private fun refreshState() {
-        val hasFolder = CloudFolderAccess.hasAccess(this)
+        cancelFolderRefresh()
+        val tree = CloudFolderAccess.load(this)
+        val hasFolder = tree != null
         val powerManager = getSystemService(PowerManager::class.java)
         screenState.value = SettingsScreenState(
             folderReady = hasFolder,
-            folderPath = if (hasFolder) CloudFolderAccess.displayPath(this) else null,
+            folderPath = if (hasFolder) "Odczytywanie nazwy folderu…" else null,
             batteryUnrestricted = powerManager.isIgnoringBatteryOptimizations(packageName),
         )
+        if (tree == null) return
+        val generation = folderGeneration
+        val cancellation = CancellationSignal()
+        folderCancellation = cancellation
+        val app = applicationContext
+        folderTask = folderExecutor.submit {
+            val path = try {
+                val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+                app.contentResolver.query(
+                    root,
+                    arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                    null,
+                    null,
+                    null,
+                    cancellation,
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else null
+                }?.takeIf { it.isNotBlank() } ?: "Wybrany folder OneDrive"
+            } catch (_: Exception) {
+                "Wybrany folder OneDrive"
+            }
+            if (!cancellation.isCanceled && !Thread.currentThread().isInterrupted) runOnUiThread {
+                if (!uiDestroyed && generation == folderGeneration) {
+                    folderTask = null
+                    folderCancellation = null
+                    screenState.value = screenState.value.copy(folderPath = path)
+                }
+            }
+        }
+    }
+
+    private fun cancelFolderRefresh() {
+        folderGeneration++
+        folderCancellation?.cancel()
+        folderCancellation = null
+        folderTask?.cancel(true)
+        folderTask = null
     }
 }
 

@@ -4,10 +4,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.res.AssetFileDescriptor
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
@@ -59,11 +61,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import java.io.FileInputStream
+import java.io.IOException
 import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Future
 import kotlin.math.abs
 import kotlin.math.floor
@@ -72,8 +76,11 @@ import kotlin.math.sqrt
 class RecordingsActivity : ComponentActivity() {
     private val screenState = mutableStateOf(RecordingsScreenState())
     private var recordings = emptyList<Recording>()
-    private var player: MediaPlayer? = null
     private var playingUri: Uri? = null
+    private var playback: RecordingPlaybackController? = null
+    private val operationExecutor = Executors.newFixedThreadPool(2)
+    private val deletionTasks = mutableMapOf<Uri, Future<*>>()
+    private var uiDestroyed = false
     private val loadExecutor = Executors.newSingleThreadExecutor()
     private var loadTask: Future<*>? = null
     private var loadGeneration = 0
@@ -89,6 +96,24 @@ class RecordingsActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val app = applicationContext
+        playback = RecordingPlaybackController(
+            executor = operationExecutor,
+            acquireSource = { uri, cancellation ->
+                app.contentResolver.openAssetFileDescriptor(uri, "r", cancellation)
+            },
+            onState = { preparing, playing ->
+                if (!uiDestroyed) {
+                    playingUri = playing
+                    screenState.value = screenState.value.copy(preparingUri = preparing, playingUri = playing)
+                }
+            },
+            onError = {
+                if (!uiDestroyed) {
+                    Toast.makeText(this, "Nie udało się odtworzyć nagrania z OneDrive", Toast.LENGTH_LONG).show()
+                }
+            },
+        )
         enableEdgeToEdge()
         setContent {
             SpeechRecorderTheme {
@@ -143,12 +168,21 @@ class RecordingsActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        uiDestroyed = true
         refreshHandler.removeCallbacks(refreshTask)
         loadGeneration++
         loadTask?.cancel(true)
         loadExecutor.shutdownNow()
-        stopPlayback(updateUi = false)
+        playback?.close()
+        deletionTasks.values.forEach { it.cancel(true) }
+        deletionTasks.clear()
+        operationExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    override fun onStop() {
+        playback?.stop()
+        super.onStop()
     }
 
     private fun loadRecordings() {
@@ -285,25 +319,7 @@ class RecordingsActivity : ComponentActivity() {
     }
 
     private fun togglePlayback(recording: Recording) {
-        if (playingUri == recording.uri && player?.isPlaying == true) {
-            stopPlayback()
-            return
-        }
-
-        stopPlayback()
-        try {
-            player = MediaPlayer().apply {
-                setDataSource(this@RecordingsActivity, recording.uri)
-                setOnCompletionListener { stopPlayback() }
-                prepare()
-                start()
-            }
-            playingUri = recording.uri
-            screenState.value = screenState.value.copy(playingUri = playingUri)
-        } catch (_: Exception) {
-            stopPlayback()
-            Toast.makeText(this, "Nie udało się odtworzyć nagrania z OneDrive", Toast.LENGTH_LONG).show()
-        }
+        if (recording.uri !in screenState.value.deletingUris) playback?.toggle(recording.uri)
     }
 
     private fun shareRecording(recording: Recording) {
@@ -320,27 +336,34 @@ class RecordingsActivity : ComponentActivity() {
     }
 
     private fun deleteRecording(recording: Recording) {
-        if (playingUri == recording.uri) stopPlayback()
-        if (RecordingStorage.deletePublished(this, recording.uri, recording.name)) {
-            Toast.makeText(this, "Nagranie usunięte z OneDrive", Toast.LENGTH_SHORT).show()
-            loadRecordings()
-        } else {
-            Toast.makeText(this, "Nie udało się usunąć nagrania z OneDrive", Toast.LENGTH_LONG).show()
-        }
+        deleteRecording(recording.uri, recording.name)
     }
 
-    private fun stopPlayback(updateUi: Boolean = true) {
-        player?.let {
-            try {
-                it.stop()
+    internal fun deleteRecording(uri: Uri, name: String) {
+        if (uiDestroyed || uri in screenState.value.deletingUris) return
+        if (playingUri == uri || screenState.value.preparingUri == uri) playback?.stop()
+        screenState.value = screenState.value.copy(deletingUris = screenState.value.deletingUris + uri)
+        val app = applicationContext
+        deletionTasks[uri] = operationExecutor.submit {
+            val deleted = try {
+                RecordingStorage.deletePublished(app, uri, name)
             } catch (_: Exception) {
+                false
             }
-            it.release()
-        }
-        player = null
-        playingUri = null
-        if (updateUi && !isDestroyed) {
-            screenState.value = screenState.value.copy(playingUri = null)
+            if (!Thread.currentThread().isInterrupted) runOnUiThread {
+                if (!uiDestroyed) {
+                    deletionTasks.remove(uri)
+                    screenState.value = screenState.value.copy(
+                        deletingUris = screenState.value.deletingUris - uri,
+                    )
+                    Toast.makeText(
+                        this,
+                        if (deleted) "Nagranie usunięte z OneDrive" else "Nie udało się usunąć nagrania z OneDrive",
+                        if (deleted) Toast.LENGTH_SHORT else Toast.LENGTH_LONG,
+                    ).show()
+                    if (deleted) loadRecordings()
+                }
+            }
         }
     }
 
@@ -348,6 +371,172 @@ class RecordingsActivity : ComponentActivity() {
         val SORT_LABELS = listOf("Najnowsze", "Najstarsze", "Najdłuższe", "Największe")
         val BARS = charArrayOf('▁', '▂', '▃', '▄', '▅', '▆', '▇', '█')
         const val WAVEFORM_BARS = 28
+    }
+}
+
+internal interface RecordingPlayer {
+    fun setDataSource(source: AssetFileDescriptor)
+    fun setOnPreparedListener(listener: () -> Unit)
+    fun setOnCompletionListener(listener: () -> Unit)
+    fun setOnErrorListener(listener: () -> Unit)
+    fun prepareAsync()
+    fun start()
+    fun release()
+}
+
+private class AndroidRecordingPlayer : RecordingPlayer {
+    private val player = MediaPlayer()
+
+    override fun setDataSource(source: AssetFileDescriptor) {
+        if (source.declaredLength == AssetFileDescriptor.UNKNOWN_LENGTH) {
+            player.setDataSource(source.fileDescriptor)
+        } else {
+            player.setDataSource(source.fileDescriptor, source.startOffset, source.declaredLength)
+        }
+    }
+
+    override fun setOnPreparedListener(listener: () -> Unit) {
+        player.setOnPreparedListener { listener() }
+    }
+
+    override fun setOnCompletionListener(listener: () -> Unit) {
+        player.setOnCompletionListener { listener() }
+    }
+
+    override fun setOnErrorListener(listener: () -> Unit) {
+        player.setOnErrorListener { _, _, _ ->
+            listener()
+            true
+        }
+    }
+
+    override fun prepareAsync() = player.prepareAsync()
+    override fun start() = player.start()
+    override fun release() = player.release()
+}
+
+internal class RecordingPlaybackController(
+    private val executor: ExecutorService,
+    private val acquireSource: (Uri, CancellationSignal) -> AssetFileDescriptor?,
+    private val onState: (Uri?, Uri?) -> Unit,
+    private val onError: () -> Unit,
+    private val playerFactory: () -> RecordingPlayer = { AndroidRecordingPlayer() },
+    private val handler: Handler = Handler(Looper.getMainLooper()),
+) : AutoCloseable {
+    private class Session(val uri: Uri, val player: RecordingPlayer) {
+        private var released = false
+
+        fun release() {
+            if (released) return
+            released = true
+            try {
+                player.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private var session: Session? = null
+    private var requestedUri: Uri? = null
+    private var generation = 0
+    private var acquisition: Future<*>? = null
+    private var cancellation: CancellationSignal? = null
+    private var closed = false
+
+    fun toggle(uri: Uri) {
+        if (closed) return
+        if (requestedUri == uri) {
+            stop()
+            return
+        }
+        stop()
+        val token = ++generation
+        val signal = CancellationSignal()
+        cancellation = signal
+        requestedUri = uri
+        onState(uri, null)
+        acquisition = executor.submit {
+            var source: AssetFileDescriptor? = null
+            try {
+                source = acquireSource(uri, signal) ?: throw IOException("Recording source unavailable")
+                signal.throwIfCanceled()
+                if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                val acquired = checkNotNull(source)
+                source = null
+                if (!handler.post {
+                    if (closed || generation != token || signal.isCanceled) {
+                        closeSource(acquired)
+                    } else {
+                        acquisition = null
+                        cancellation = null
+                        try {
+                            val candidate = Session(uri, playerFactory())
+                            session = candidate
+                            candidate.player.setOnPreparedListener {
+                                if (session === candidate && generation == token && !closed) {
+                                    try {
+                                        candidate.player.start()
+                                        onState(null, uri)
+                                    } catch (_: Exception) {
+                                        fail(token)
+                                    }
+                                }
+                            }
+                            candidate.player.setOnCompletionListener {
+                                if (session === candidate && generation == token && !closed) stop()
+                            }
+                            candidate.player.setOnErrorListener {
+                                if (session === candidate && generation == token && !closed) fail(token)
+                            }
+                            candidate.player.setDataSource(acquired)
+                            candidate.player.prepareAsync()
+                        } catch (_: Exception) {
+                            fail(token)
+                        } finally {
+                            closeSource(acquired)
+                        }
+                    }
+                }) closeSource(acquired)
+            } catch (_: Exception) {
+                if (!signal.isCanceled && !Thread.currentThread().isInterrupted) {
+                    handler.post { if (!closed && generation == token) fail(token) }
+                }
+            } finally {
+                source?.let(::closeSource)
+            }
+        }
+    }
+
+    fun stop() {
+        if (closed) return
+        generation++
+        cancellation?.cancel()
+        cancellation = null
+        acquisition?.cancel(true)
+        acquisition = null
+        session?.release()
+        session = null
+        requestedUri = null
+        onState(null, null)
+    }
+
+    override fun close() {
+        if (closed) return
+        stop()
+        closed = true
+    }
+
+    private fun fail(token: Int) {
+        if (closed || generation != token) return
+        stop()
+        onError()
+    }
+
+    private fun closeSource(source: AssetFileDescriptor) {
+        try {
+            source.close()
+        } catch (_: Exception) {
+        }
     }
 }
 
@@ -367,6 +556,8 @@ private data class RecordingsScreenState(
     val loading: Boolean = false,
     val cloudReady: Boolean = true,
     val playingUri: Uri? = null,
+    val preparingUri: Uri? = null,
+    val deletingUris: Set<Uri> = emptySet(),
     val pendingDelete: Recording? = null,
     val error: String? = null,
 )
@@ -513,6 +704,8 @@ private fun RecordingsScreen(
                 RecordingCard(
                     recording = recording,
                     playing = state.playingUri == recording.uri,
+                    preparing = state.preparingUri == recording.uri,
+                    deleting = recording.uri in state.deletingUris,
                     onPlay = { onPlay(recording) },
                     onShare = { onShare(recording) },
                     onDelete = { onDeleteRequest(recording) },
@@ -526,6 +719,8 @@ private fun RecordingsScreen(
 private fun RecordingCard(
     recording: Recording,
     playing: Boolean,
+    preparing: Boolean,
+    deleting: Boolean,
     onPlay: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
@@ -550,9 +745,10 @@ private fun RecordingCard(
             ) {
                 IconButton(
                     onClick = onPlay,
+                    enabled = !deleting,
                     modifier = Modifier.size(48.dp),
                 ) {
-                    Icon(
+                    if (preparing) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp) else Icon(
                         imageVector = if (playing) Icons.Outlined.StopCircle else Icons.Outlined.PlayArrow,
                         contentDescription = if (playing) "Zatrzymaj odtwarzanie" else "Odtwórz nagranie",
                         tint = MaterialTheme.colorScheme.primary,
@@ -578,11 +774,11 @@ private fun RecordingCard(
                     )
                 }
 
-                IconButton(onClick = onShare) {
+                IconButton(onClick = onShare, enabled = !deleting) {
                     Icon(Icons.Outlined.Share, contentDescription = "Udostępnij")
                 }
-                IconButton(onClick = onDelete) {
-                    Icon(
+                IconButton(onClick = onDelete, enabled = !deleting) {
+                    if (deleting) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp) else Icon(
                         Icons.Outlined.DeleteOutline,
                         contentDescription = "Usuń",
                         tint = MaterialTheme.colorScheme.error,

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -25,6 +26,8 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
 import java.nio.channels.OverlappingFileLockException
+import java.security.DigestInputStream
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -34,6 +37,7 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import java.util.zip.ZipFile
 
 object RecordingStorage {
     const val ACTION_LIBRARY_CHANGED = "pl.lisu188.speechrecorder.LIBRARY_CHANGED"
@@ -50,6 +54,7 @@ object RecordingStorage {
     private val cloudUploadExecutor = Executors.newSingleThreadExecutor()
     private val recoveryLock = Any()
     private val archiveLock = Any()
+    private val recordingLocks = Array(64) { Any() }
 
     data class StoredRecording(
         val uri: Uri,
@@ -57,6 +62,8 @@ object RecordingStorage {
         val sizeBytes: Long,
         val lastModifiedMs: Long,
         val archived: Boolean,
+        val reportedSizeBytes: Long? = sizeBytes,
+        val partial: Boolean = false,
     )
 
     fun directory(context: Context): File = File(context.noBackupFilesDir, "recordings").also {
@@ -113,6 +120,11 @@ object RecordingStorage {
 
     internal fun <T> withArchiveLock(block: () -> T): T =
         synchronized(archiveLock) { block() }
+
+    private fun <T> withRecordingLock(name: String, block: () -> T): T =
+        synchronized(recordingLocks[(name.lowercase(Locale.ROOT).hashCode() and Int.MAX_VALUE) % recordingLocks.size]) {
+            block()
+        }
 
     fun enqueue(context: Context, file: File) {
         try {
@@ -257,15 +269,19 @@ object RecordingStorage {
                         if (!name.endsWith(".wav", ignoreCase = true)) continue
                         val source = ContentUris.withAppendedId(collection, cursor.getLong(idColumn))
                         val expectedSize = cursor.getLong(sizeColumn)
-                        val copied = app.contentResolver.openInputStream(source)?.use { input ->
-                            try {
-                                copyToCloudVerified(app, name, "audio/wav", input, expectedSize)
-                                true
-                            } catch (_: Exception) {
-                                false
-                            }
-                        } ?: false
-                        if (copied) app.contentResolver.delete(source, null, null)
+                        withRecordingLock(name) {
+                            val tree = CloudFolderAccess.load(app) ?: return@withRecordingLock
+                            val copied = app.contentResolver.openInputStream(source)?.use { input ->
+                                try {
+                                    copyToCloudVerified(app, name, "audio/wav", input, expectedSize, tree)
+                                    requireSelectedTree(app, tree)
+                                    true
+                                } catch (_: Exception) {
+                                    false
+                                }
+                            } ?: false
+                            if (copied) app.contentResolver.delete(source, null, null)
+                        }
                     }
                 }
                 libraryChanged(app)
@@ -278,20 +294,22 @@ object RecordingStorage {
 
     fun listPublished(context: Context): List<StoredRecording> =
         CloudFolderAccess.listAudio(context).map {
-            StoredRecording(it.uri, it.name, it.sizeBytes, it.lastModifiedMs, it.archived)
+            StoredRecording(it.uri, it.name, it.sizeBytes, it.lastModifiedMs, it.archived, it.reportedSizeBytes, it.partial)
         }
 
-    fun deletePublished(context: Context, uri: Uri, name: String? = null): Boolean {
-        val deleted = CloudFolderAccess.delete(context, uri)
-        if (deleted) {
-            name?.takeIf { it.matches(FINAL_NAME_REGEX) }?.let {
-                CloudFolderAccess.deleteLiveExact(context, commitMarkerName(it))
-                CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(it))
+    fun deletePublished(context: Context, uri: Uri, name: String? = null): Boolean =
+        withRecordingLock(name ?: uri.toString()) {
+            val deleted = CloudFolderAccess.delete(context, uri)
+            if (deleted) {
+                name?.takeIf { it.matches(FINAL_NAME_REGEX) }?.let {
+                    val tree = DocumentsContract.buildTreeDocumentUri(uri.authority, DocumentsContract.getTreeDocumentId(uri))
+                    CloudFolderAccess.deleteLiveExact(context, commitMarkerName(it), tree)
+                    CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(it), tree)
+                }
+                libraryChanged(context)
             }
-            libraryChanged(context)
+            deleted
         }
-        return deleted
-    }
 
     internal fun migrateLegacy(context: Context) {
         val legacy = listOfNotNull(
@@ -348,59 +366,111 @@ object RecordingStorage {
         return dataSize
     }
 
-    internal fun publish(context: Context, wavFile: File): Boolean {
-        if (!wavFile.exists()) return true
-        if (wavFile.length() <= 44L) return wavFile.delete()
-        if (!CloudFolderAccess.hasAccess(context)) {
-            reportError(context, "Nagranie zachowano lokalnie. Wybierz folder OneDrive w Ustawieniach.")
-            return false
-        }
-
-        val marker = commitMarkerName(wavFile.name)
-        return try {
-            if (!CloudFolderAccess.liveExists(context, marker)) {
-                val expectedSize = wavFile.length()
-                wavFile.inputStream().use { input ->
-                    copyToCloudVerified(context, wavFile.name, "audio/wav", input, expectedSize)
+    internal fun publish(context: Context, wavFile: File): Boolean =
+        withRecordingLock(wavFile.name) {
+            if (!wavFile.exists()) return@withRecordingLock true
+            try {
+                withClosedRecording(wavFile) { bytes ->
+                    if (bytes == 0L) return@withClosedRecording wavFile.delete()
+                    val tree = CloudFolderAccess.load(context) ?: return@withClosedRecording false
+                    val expectedSize = wavFile.length()
+                    if (!hasVerifiedCommit(context, tree, wavFile.name, expectedSize)) {
+                        val finalUri = wavFile.inputStream().use { input ->
+                            copyToCloudVerified(context, wavFile.name, "audio/wav", input, expectedSize, tree)
+                        }
+                        requireSelectedTree(context, tree)
+                        writeCommitReceipt(context, tree, wavFile.name, finalUri, expectedSize)
+                    }
+                    requireSelectedTree(context, tree)
+                    if (!hasVerifiedCommit(context, tree, wavFile.name, expectedSize)) {
+                        throw IOException("Final recording receipt verification failed")
+                    }
+                    CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(wavFile.name), tree)
+                    CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(wavFile.name), tree)
+                    requireSelectedTree(context, tree)
+                    if (!hasVerifiedCommit(context, tree, wavFile.name, expectedSize)) {
+                        throw IOException("Final recording changed before local cleanup")
+                    }
+                    liveDirectory(context).listFiles().orEmpty()
+                        .filter { it.name.startsWith(livePrefix(wavFile.name)) }
+                        .forEach { it.delete() }
+                    if (!wavFile.delete()) throw IOException("Unable to remove local staging file")
+                    clearStorageErrorIfEmpty(context)
+                    libraryChanged(context)
+                    true
                 }
-                writeCommitReceipt(context, marker, expectedSize)
+            } catch (_: Exception) {
+                reportError(context, "Nagranie zachowano lokalnie. Zapis do OneDrive zostanie ponowiony.")
+                false
             }
-            CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(wavFile.name))
-            CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(wavFile.name))
-            liveDirectory(context).listFiles().orEmpty()
-                .filter { it.name.startsWith(livePrefix(wavFile.name)) }
-                .forEach { it.delete() }
-            if (!wavFile.delete()) throw IOException("Unable to remove local staging file")
-            clearStorageErrorIfEmpty(context)
-            libraryChanged(context)
-            true
-        } catch (_: Exception) {
-            reportError(context, "Nagranie zachowano lokalnie. Zapis do OneDrive zostanie ponowiony.")
-            false
         }
-    }
 
     internal fun publishLivePart(context: Context, file: File): Boolean {
         val finalName = finalNameForLivePart(file.name) ?: return false
-        if (!file.exists()) return true
-        if (!CloudFolderAccess.hasAccess(context)) return false
-        val marker = commitMarkerName(finalName)
-        return try {
-            if (!CloudFolderAccess.liveExists(context, marker)) {
-                val expectedSize = file.length()
-                file.inputStream().use { input ->
-                    copyLiveToCloudVerified(context, file.name, "audio/wav", input, expectedSize)
+        return withRecordingLock(finalName) {
+            if (!file.exists()) return@withRecordingLock true
+            try {
+                withClosedRecording(file) { bytes ->
+                    if (bytes == 0L) return@withClosedRecording file.delete()
+                    val tree = CloudFolderAccess.load(context) ?: return@withClosedRecording false
+                    val committed = hasVerifiedCommit(context, tree, finalName)
+                    if (committed) {
+                        CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(finalName), tree)
+                        CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(finalName), tree)
+                    } else {
+                        file.inputStream().use { input ->
+                            copyLiveToCloudVerified(context, file.name, "audio/wav", input, file.length(), tree)
+                        }
+                    }
+                    requireSelectedTree(context, tree)
+                    if (committed && !hasVerifiedCommit(context, tree, finalName)) {
+                        throw IOException("Final recording changed before live cleanup")
+                    }
+                    if (!file.delete()) throw IOException("Unable to remove uploaded live part")
+                    true
                 }
-                if (CloudFolderAccess.liveExists(context, marker)) {
-                    CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(finalName))
-                    CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(finalName))
-                }
-            } else {
-                CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(finalName))
-                CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(finalName))
+            } catch (_: Exception) {
+                false
             }
-            if (!file.delete()) throw IOException("Unable to remove uploaded live part")
-            true
+        }
+    }
+
+    private fun withClosedRecording(file: File, block: (Long) -> Boolean): Boolean =
+        RandomAccessFile(file, "rw").use { audio ->
+            val lock = try {
+                audio.channel.tryLock()
+            } catch (_: OverlappingFileLockException) {
+                null
+            } ?: return@use false
+            lock.use { block(repairHeader(audio)) }
+        }
+
+    private fun requireSelectedTree(context: Context, tree: Uri) {
+        if (CloudFolderAccess.load(context) != tree) throw IOException("Recording folder changed during storage operation")
+    }
+
+    private fun hasVerifiedCommit(context: Context, tree: Uri, finalName: String, expectedSize: Long? = null): Boolean {
+        return try {
+            val marker = CloudFolderAccess.findLiveFile(context, commitMarkerName(finalName), tree) ?: return false
+            val text = context.contentResolver.openInputStream(marker)?.use { input ->
+                val payload = ByteArray(4097)
+                var length = 0
+                while (length < payload.size) {
+                    val read = input.read(payload, length, payload.size - length)
+                    if (read < 0) break
+                    if (read > 0) length += read
+                }
+                if (length > 4096) null else String(payload, 0, length, Charsets.UTF_8)
+            } ?: return false
+            val lines = text.split('\n')
+            val recordedSize = if (lines.size == 3 && lines[0] == "SR2") lines[1].toLongOrNull() else text.toLongOrNull()
+            if (recordedSize == null || recordedSize <= 44L || expectedSize != null && expectedSize != recordedSize) {
+                return false
+            }
+            val finalUri = CloudFolderAccess.findFile(context, finalName, tree) ?: return false
+            if (lines.size == 3 && lines[0] == "SR2" && lines[2] != finalUri.toString()) return false
+            val state = CloudFolderAccess.documentState(context, finalUri) ?: return false
+            !state.partial && remoteSizeMatches(recordedSize, state.sizeBytes)
         } catch (_: Exception) {
             false
         }
@@ -422,38 +492,91 @@ object RecordingStorage {
             success
         }
 
-    internal fun archiveRecording(context: Context, recording: StoredRecording): Boolean {
-        val archiveUri = try {
-            CloudFolderAccess.openOrCreateFile(context, archiveName(recording.name), "application/zip")
-        } catch (_: Exception) {
-            return false
+    internal fun archiveRecording(context: Context, recording: StoredRecording): Boolean =
+        withRecordingLock(recording.name) {
+            if (recording.reportedSizeBytes == null || recording.reportedSizeBytes <= 44L || recording.partial) {
+                return@withRecordingLock false
+            }
+            if (File(directory(context), recording.name).exists()) return@withRecordingLock false
+            try {
+                val tree = CloudFolderAccess.load(context) ?: return@withRecordingLock false
+                if (recording.uri.authority != tree.authority ||
+                    DocumentsContract.getTreeDocumentId(recording.uri) != DocumentsContract.getTreeDocumentId(tree)
+                ) return@withRecordingLock false
+                val before = CloudFolderAccess.documentState(context, recording.uri) ?: return@withRecordingLock false
+                val expectedSize = before.sizeBytes ?: return@withRecordingLock false
+                if (before.partial || expectedSize != recording.reportedSizeBytes) return@withRecordingLock false
+                val archiveUri = CloudFolderAccess.openOrCreateFile(context, archiveName(recording.name), "application/zip", tree)
+                val digest = MessageDigest.getInstance("SHA-256")
+                val (copied, archivedBytes) = context.contentResolver.openInputStream(recording.uri)?.use { input ->
+                    val rawOutput = context.contentResolver.openOutputStream(archiveUri, "wt")
+                        ?: throw IOException("OneDrive archive stream unavailable")
+                    val countedOutput = CountingOutputStream(rawOutput)
+                    val bytes = DigestInputStream(input, digest).use { source ->
+                        countedOutput.use { target -> writeZip(source, target, recording.name) }
+                    }
+                    bytes to countedOutput.bytesWritten
+                } ?: throw IOException("OneDrive source stream unavailable")
+                if (copied != expectedSize) throw IOException("Archive input was incomplete")
+                if (archivedBytes <= 0L || !remoteSizeMatches(archivedBytes, awaitRemoteSize(context, archiveUri, archivedBytes))) {
+                    throw IOException("OneDrive archive size verification failed")
+                }
+                verifyArchive(context, archiveUri, recording.name, copied, archivedBytes, digest.digest())
+                requireSelectedTree(context, tree)
+                val after = CloudFolderAccess.documentState(context, recording.uri)
+                if (after == null || after.partial || after.sizeBytes != expectedSize || after.lastModifiedMs != before.lastModifiedMs) {
+                    throw IOException("Archive source changed before cleanup")
+                }
+                if (!CloudFolderAccess.delete(context, recording.uri)) throw IOException("Unable to remove archived WAV")
+                if (recording.name.matches(FINAL_NAME_REGEX)) {
+                    CloudFolderAccess.deleteLiveExact(context, commitMarkerName(recording.name), tree)
+                    CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(recording.name), tree)
+                    CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(recording.name), tree)
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
         }
-        return try {
-            val input = context.contentResolver.openInputStream(recording.uri)
-                ?: throw IOException("OneDrive source stream unavailable")
-            val rawOutput = context.contentResolver.openOutputStream(archiveUri, "wt")
-                ?: throw IOException("OneDrive archive stream unavailable")
-            val countedOutput = CountingOutputStream(rawOutput)
-            val copied = input.use { source -> countedOutput.use { target -> writeZip(source, target, recording.name) } }
-            if (recording.sizeBytes > 0L && copied != recording.sizeBytes) {
-                throw IOException("Archive input was incomplete")
+
+    private fun verifyArchive(
+        context: Context,
+        archiveUri: Uri,
+        name: String,
+        expectedSize: Long,
+        archivedBytes: Long,
+        expectedDigest: ByteArray,
+    ) {
+        val local = File.createTempFile("archive-verify-", ".zip", context.cacheDir)
+        try {
+            val downloaded = context.contentResolver.openInputStream(archiveUri)?.use { input ->
+                local.outputStream().use { output -> input.copyTo(output) }
+            } ?: throw IOException("OneDrive archive readback unavailable")
+            if (downloaded != archivedBytes) throw IOException("Archive readback was incomplete")
+            ZipFile(local).use { zip ->
+                val entries = zip.entries().toList()
+                if (entries.size != 1 || entries[0].name != name || entries[0].size != expectedSize) {
+                    throw IOException("Archive entry verification failed")
+                }
+                val digest = MessageDigest.getInstance("SHA-256")
+                val extracted = zip.getInputStream(entries[0]).use { input ->
+                    DigestInputStream(input, digest).use { source ->
+                        var bytes = 0L
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = source.read(buffer)
+                            if (read < 0) break
+                            bytes += read
+                        }
+                        bytes
+                    }
+                }
+                if (extracted != expectedSize || !MessageDigest.isEqual(expectedDigest, digest.digest())) {
+                    throw IOException("Archive content verification failed")
+                }
             }
-            val archivedBytes = countedOutput.bytesWritten
-            val remoteSize = awaitRemoteSize(context, archiveUri, archivedBytes)
-            if (archivedBytes <= 0L || !remoteSizeMatches(archivedBytes, remoteSize)) {
-                throw IOException("OneDrive archive size verification failed")
-            }
-            if (!CloudFolderAccess.delete(context, recording.uri)) {
-                throw IOException("Unable to remove archived WAV")
-            }
-            if (recording.name.matches(FINAL_NAME_REGEX)) {
-                CloudFolderAccess.deleteLiveExact(context, commitMarkerName(recording.name))
-                CloudFolderAccess.deleteLiveByPrefix(context, livePrefix(recording.name))
-                CloudFolderAccess.deleteLegacyRootByPrefix(context, livePrefix(recording.name))
-            }
-            true
-        } catch (_: Exception) {
-            false
+        } finally {
+            local.delete()
         }
     }
 
@@ -482,8 +605,9 @@ object RecordingStorage {
         mimeType: String,
         input: InputStream,
         expectedSize: Long,
+        tree: Uri = CloudFolderAccess.load(context) ?: throw IOException("Recording folder is not configured"),
     ): Uri {
-        val target = CloudFolderAccess.openOrCreateFile(context, name, mimeType)
+        val target = CloudFolderAccess.openOrCreateFile(context, name, mimeType, tree)
         copyAndVerify(context, target, input, expectedSize)
         return target
     }
@@ -494,8 +618,9 @@ object RecordingStorage {
         mimeType: String,
         input: InputStream,
         expectedSize: Long,
+        tree: Uri = CloudFolderAccess.load(context) ?: throw IOException("Recording folder is not configured"),
     ): Uri {
-        val target = CloudFolderAccess.openOrCreateLiveFile(context, name, mimeType)
+        val target = CloudFolderAccess.openOrCreateLiveFile(context, name, mimeType, tree)
         copyAndVerify(context, target, input, expectedSize)
         return target
     }
@@ -513,10 +638,11 @@ object RecordingStorage {
         }
     }
 
-    private fun writeCommitReceipt(context: Context, markerName: String, expectedSize: Long) {
-        val payload = expectedSize.toString().toByteArray(Charsets.US_ASCII)
-        val target = CloudFolderAccess.openOrCreateLiveFile(context, markerName, "application/octet-stream")
+    private fun writeCommitReceipt(context: Context, tree: Uri, finalName: String, finalUri: Uri, expectedSize: Long) {
+        val payload = "SR2\n$expectedSize\n$finalUri".toByteArray(Charsets.UTF_8)
+        val target = CloudFolderAccess.openOrCreateLiveFile(context, commitMarkerName(finalName), "application/octet-stream", tree)
         payload.inputStream().use { input -> copyAndVerify(context, target, input, payload.size.toLong()) }
+        if (!hasVerifiedCommit(context, tree, finalName, expectedSize)) throw IOException("Commit receipt readback failed")
     }
 
     private fun awaitRemoteSize(context: Context, target: Uri, expectedSize: Long): Long? {
@@ -597,21 +723,7 @@ class RecordingPublishWorker(context: Context, parameters: WorkerParameters) : W
         return try {
             val file = File(RecordingStorage.directory(applicationContext), name)
             if (!file.isFile) return Result.success()
-            RandomAccessFile(file, "rw").use { audio ->
-                val lock = try {
-                    audio.channel.tryLock()
-                } catch (_: OverlappingFileLockException) {
-                    null
-                }
-                if (lock == null) return Result.retry()
-                lock.use {
-                    val bytes = RecordingStorage.repairHeader(audio)
-                    if (bytes == 0L) {
-                        return if (file.delete()) Result.success() else Result.retry()
-                    }
-                    if (RecordingStorage.publish(applicationContext, file)) Result.success() else Result.retry()
-                }
-            }
+            if (RecordingStorage.publish(applicationContext, file)) Result.success() else Result.retry()
         } catch (_: IOException) {
             Result.retry()
         } catch (_: SecurityException) {

@@ -10,7 +10,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
@@ -25,6 +27,7 @@ import java.io.RandomAccessFile
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.Executor
 import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.min
@@ -34,6 +37,7 @@ import kotlin.math.sqrt
 class RecorderService : Service() {
     private val running = AtomicBoolean(false)
     private val serviceToken = Any()
+    private var claimedStatus = false
     private var worker: Thread? = null
     @Volatile private var audioRecord: AudioRecord? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -42,6 +46,8 @@ class RecorderService : Service() {
     @Volatile private var destroyed = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var microphoneSilenced = false
+    @Volatile private var captureInterrupted = false
 
     override fun onCreate() {
         super.onCreate()
@@ -53,12 +59,7 @@ class RecorderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_START
         if (action == ACTION_STOP) {
-            activeService.compareAndSet(serviceToken, null)
-            prefs().edit()
-                .putBoolean("enabled", false)
-                .putBoolean("speech_active", false)
-                .apply()
-            sendLevelBroadcast(0, false)
+            clearServiceStatus(disable = true, allowUnowned = true)
             stopCapture()
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -80,8 +81,18 @@ class RecorderService : Service() {
             stopWithError("Android zablokował start w tle. Otwórz aplikację i rozpocznij nagrywanie ponownie.")
             return START_NOT_STICKY
         }
-        activeService.set(serviceToken)
-        prefs().edit().putBoolean("enabled", true).remove("capture_error").apply()
+        synchronized(serviceStateLock) {
+            val continuingCapture = activeService.get() === serviceToken && running.get()
+            activeService.set(serviceToken)
+            claimedStatus = true
+            val edit = prefs().edit().putBoolean("enabled", true).remove("capture_error")
+            if (!continuingCapture) {
+                microphoneSilenced = false
+                captureInterrupted = false
+                edit.putBoolean(KEY_CAPTURE_SILENCED, false).putBoolean("speech_active", false)
+            }
+            edit.apply()
+        }
         acquireWakeLock()
         if (!running.get()) startCapture()
         return START_STICKY
@@ -91,9 +102,7 @@ class RecorderService : Service() {
 
     override fun onDestroy() {
         destroyed = true
-        activeService.compareAndSet(serviceToken, null)
-        prefs().edit().putBoolean("speech_active", false).apply()
-        sendLevelBroadcast(0, false)
+        clearServiceStatus(disable = false)
         stopCapture()
         releaseWakeLock()
         super.onDestroy()
@@ -113,17 +122,16 @@ class RecorderService : Service() {
     }
 
     private fun updateNotification(speechActive: Boolean) {
-        val active = running.get() && prefs().getBoolean("enabled", false) && !destroyed
-        prefs().edit().putBoolean("speech_active", speechActive && active).apply()
+        withActiveStatus {
+            val active = running.get() && prefs().getBoolean("enabled", false) && !destroyed && !microphoneSilenced
+            prefs().edit().putBoolean("speech_active", speechActive && active).apply()
+        }
     }
 
     private fun stopWithError(message: String) {
-        activeService.compareAndSet(serviceToken, null)
-        prefs().edit().putBoolean("enabled", false).putBoolean("speech_active", false)
-            .putString("capture_error", message).apply()
+        clearServiceStatus(disable = true, allowUnowned = true, message = message)
         stopCapture()
         releaseWakeLock()
-        sendLevelBroadcast(0, false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -168,7 +176,7 @@ class RecorderService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (activeService.get() != null) {
+        withActiveStatus {
             prefs().edit().putBoolean("enabled", true).apply()
         }
         super.onTaskRemoved(rootIntent)
@@ -208,7 +216,7 @@ class RecorderService : Service() {
                 mainHandler.post {
                     if (worker === finished) {
                         worker = null
-                        if (!destroyed && prefs().getBoolean("enabled", false)) startCapture()
+                        if (!destroyed && activeService.get() === serviceToken && prefs().getBoolean("enabled", false)) startCapture()
                     }
                 }
             }
@@ -226,7 +234,7 @@ class RecorderService : Service() {
     }
 
     private fun captureSupervisorLoop() {
-        while (running.get() && prefs().getBoolean("enabled", false)) {
+        while (running.get() && activeService.get() === serviceToken && prefs().getBoolean("enabled", false)) {
             captureLoop()
             if (!running.get() || !prefs().getBoolean("enabled", false)) break
             updateNotification(false)
@@ -242,8 +250,8 @@ class RecorderService : Service() {
 
     private fun captureLoop() {
         val prebuffer = ArrayDeque<ShortArray>(PREBUFFER_FRAMES + 1)
-        var sink: WavSink? = null
-        var liveMirror: LiveMirror? = null
+        var clip: RecordingClip? = null
+        var recordingCallback: AudioManager.AudioRecordingCallback? = null
         var silenceFrames = 0
         var consecutiveSpeechFrames = 0
         var clipFrames = 0
@@ -275,16 +283,31 @@ class RecorderService : Service() {
                 noiseSuppressor = NoiseSuppressor.create(record.audioSessionId)?.apply { enabled = true }
             }
 
+            recordingCallback = registerRecordingMonitor(record)
             record.startRecording()
             check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Microphone did not start" }
-            prefs().edit().remove("capture_error").apply()
+            refreshMicrophoneState(record)
+            withActiveStatus { prefs().edit().remove("capture_error").apply() }
             val frame = ShortArray(FRAME_SAMPLES)
 
-            while (running.get()) {
+            while (running.get() && activeService.get() === serviceToken) {
                 val read = readFrame(record, frame)
                 if (read < 0) throw IOException("AudioRecord read failed: $read")
                 if (read == 0) continue
                 if (read < frame.size) frame.fill(0, read, frame.size)
+
+                if (microphoneSilenced || captureInterrupted) {
+                    captureInterrupted = false
+                    clip?.let { RecordingStorage.enqueueCompleted(this, it.closeAndGetFile()) }
+                    clip = null
+                    prebuffer.clear()
+                    silenceFrames = 0
+                    consecutiveSpeechFrames = 0
+                    clipFrames = 0
+                    updateNotification(false)
+                    sendLevelBroadcast(0, false)
+                    if (microphoneSilenced) continue
+                }
 
                 val stats = analyze(frame, read)
                 val adaptiveThreshold = max(-46.0, min(-30.0, noiseFloorDb + 11.0))
@@ -294,11 +317,11 @@ class RecorderService : Service() {
                 val now = System.currentTimeMillis()
 
                 if (now - lastLevelBroadcastMs >= LEVEL_BROADCAST_INTERVAL_MS) {
-                    sendLevelBroadcast(mapLevel(stats.dbFs), sink != null)
+                    sendLevelBroadcast(mapLevel(stats.dbFs), clip != null)
                     lastLevelBroadcastMs = now
                 }
 
-                if (!speech && sink == null && stats.dbFs < noiseFloorDb + 6.0) {
+                if (!speech && clip == null && stats.dbFs < noiseFloorDb + 6.0) {
                     noiseFloorDb = (noiseFloorDb * 0.995 + stats.dbFs * 0.005).coerceIn(-72.0, -38.0)
                 }
 
@@ -308,21 +331,20 @@ class RecorderService : Service() {
                 if (speech) {
                     consecutiveSpeechFrames++
                     silenceFrames = 0
-                    if (sink != null && now - lastSpeechTimestamp >= 1000L) rememberSpeech(now)
+                    if (clip != null && now - lastSpeechTimestamp >= 1000L) rememberSpeech(now)
                 } else {
                     consecutiveSpeechFrames = 0
-                    if (sink != null) silenceFrames++
+                    if (clip != null) silenceFrames++
                 }
 
-                if (sink == null && consecutiveSpeechFrames >= SPEECH_FRAMES_TO_START) {
+                if (clip == null && consecutiveSpeechFrames >= SPEECH_FRAMES_TO_START) {
                     val finalFile = RecordingStorage.newFile(this, now - prebuffer.size * FRAME_MS)
                     val newSink = WavSink(finalFile, SAMPLE_RATE)
-                    val newMirror = LiveMirror(this, finalFile.name, SAMPLE_RATE)
-                    sink = newSink
-                    liveMirror = newMirror
+                    val newClip = RecordingClip(newSink, ::reportMirrorFailure)
+                    clip = newClip
+                    newClip.attachMirror { LiveMirror(this, finalFile.name, SAMPLE_RATE) }
                     prebuffer.forEach { buffered ->
-                        newSink.write(buffered, buffered.size)
-                        newMirror.write(buffered, buffered.size)
+                        newClip.write(buffered, buffered.size)
                     }
                     clipFrames = prebuffer.size
                     rememberSpeech(now)
@@ -331,15 +353,12 @@ class RecorderService : Service() {
                     continue
                 }
 
-                val activeSink = sink ?: continue
-                activeSink.write(frame, read)
-                liveMirror?.write(frame, read)
+                val activeClip = clip ?: continue
+                activeClip.write(frame, read)
                 clipFrames++
                 if (silenceFrames >= SILENCE_FRAMES_TO_STOP || clipFrames >= MAX_CLIP_FRAMES) {
-                    val completed = activeSink.closeAndGetFile()
-                    liveMirror?.close()
-                    liveMirror = null
-                    sink = null
+                    val completed = activeClip.closeAndGetFile()
+                    clip = null
                     RecordingStorage.enqueueCompleted(this, completed)
                     silenceFrames = 0
                     consecutiveSpeechFrames = 0
@@ -354,13 +373,13 @@ class RecorderService : Service() {
         } catch (_: Exception) {
             if (running.get()) {
                 Log.w("SpeechRecorder", "Audio capture interrupted; retrying microphone initialization")
-                prefs().edit().putString("capture_error", "Przerwano odczyt mikrofonu. Ponawiam połączenie.").apply()
+                withActiveStatus {
+                    prefs().edit().putString("capture_error", "Przerwano odczyt mikrofonu. Ponawiam połączenie.").apply()
+                }
             }
         } finally {
-            sink?.let {
+            clip?.let {
                 try {
-                    liveMirror?.close()
-                    liveMirror = null
                     RecordingStorage.enqueueCompleted(this, it.closeAndGetFile())
                 } catch (_: Exception) {
                 }
@@ -374,6 +393,10 @@ class RecorderService : Service() {
             noiseSuppressor = null
             audioRecord?.let {
                 try {
+                    recordingCallback?.let(it::unregisterAudioRecordingCallback)
+                } catch (_: Exception) {
+                }
+                try {
                     it.release()
                 } catch (_: Exception) {
                 }
@@ -383,11 +406,19 @@ class RecorderService : Service() {
     }
 
     private fun rememberSpeech(timestamp: Long) {
-        lastSpeechTimestamp = timestamp
-        prefs().edit().putLong("last_speech", timestamp).apply()
+        withActiveStatus {
+            lastSpeechTimestamp = timestamp
+            prefs().edit().putLong("last_speech", timestamp).apply()
+        }
     }
 
     private fun sendLevelBroadcast(level: Int, speechActive: Boolean) {
+        withActiveStatus {
+            broadcastLevel(if (microphoneSilenced) 0 else level, speechActive && !microphoneSilenced)
+        }
+    }
+
+    private fun broadcastLevel(level: Int, speechActive: Boolean) {
         sendBroadcast(
             Intent(ACTION_LEVEL)
                 .setPackage(packageName)
@@ -395,6 +426,61 @@ class RecorderService : Service() {
                 .putExtra(EXTRA_SPEECH, speechActive)
                 .putExtra(EXTRA_LAST_SPEECH, lastSpeechTimestamp),
         )
+    }
+
+    private fun withActiveStatus(block: () -> Unit) {
+        synchronized(serviceStateLock) {
+            if (activeService.get() === serviceToken) block()
+        }
+    }
+
+    private fun clearServiceStatus(disable: Boolean, allowUnowned: Boolean = false, message: String? = null) {
+        synchronized(serviceStateLock) {
+            val owner = activeService.get()
+            if (owner !== serviceToken && !(allowUnowned && owner == null && !claimedStatus)) return
+            val edit = prefs().edit().putBoolean("speech_active", false).putBoolean(KEY_CAPTURE_SILENCED, false)
+            if (disable) edit.putBoolean("enabled", false)
+            if (message != null) edit.putString("capture_error", message)
+            edit.apply()
+            broadcastLevel(0, false)
+            activeService.compareAndSet(serviceToken, null)
+        }
+    }
+
+    internal fun updateMicrophoneSilenced(record: AudioRecord, silenced: Boolean) {
+        withActiveStatus {
+            if (audioRecord !== record || !running.get() || destroyed) return@withActiveStatus
+            if (microphoneSilenced == silenced) return@withActiveStatus
+            microphoneSilenced = silenced
+            if (silenced) captureInterrupted = true
+            val edit = prefs().edit().putBoolean(KEY_CAPTURE_SILENCED, silenced)
+            if (silenced) edit.putBoolean("speech_active", false)
+            edit.apply()
+            broadcastLevel(0, false)
+        }
+    }
+
+    internal fun registerRecordingMonitor(record: AudioRecord): AudioManager.AudioRecordingCallback {
+        val callback = object : AudioManager.AudioRecordingCallback() {
+            override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
+                val configuration = configs.firstOrNull { it.clientAudioSessionId == record.audioSessionId }
+                    ?: record.activeRecordingConfiguration
+                configuration?.let { updateMicrophoneSilenced(record, it.isClientSilenced) }
+            }
+        }
+        record.registerAudioRecordingCallback(Executor { mainHandler.post(it) }, callback)
+        return callback
+    }
+
+    internal fun refreshMicrophoneState(record: AudioRecord) {
+        record.activeRecordingConfiguration?.let { updateMicrophoneSilenced(record, it.isClientSilenced) }
+    }
+
+    private fun reportMirrorFailure(error: Exception) {
+        Log.w("SpeechRecorder", "Live mirror failed; retaining primary recording", error)
+        withActiveStatus {
+            prefs().edit().putString("storage_error", "Bieżąca kopia OneDrive została przerwana. Nagranie pozostaje w telefonie i zostanie wysłane po zakończeniu.").apply()
+        }
     }
 
     private fun mapLevel(dbFs: Double): Int = (((dbFs + 60.0) / 60.0)
@@ -434,12 +520,66 @@ class RecorderService : Service() {
 
     private data class FrameStats(val dbFs: Double, val zeroCrossingRate: Double)
 
+    internal interface AudioMirror {
+        fun write(samples: ShortArray, length: Int)
+        fun close()
+    }
+
+    internal class RecordingClip(
+        private val sink: WavSink,
+        private val onMirrorFailure: (Exception) -> Unit,
+    ) {
+        private var mirror: AudioMirror? = null
+
+        fun attachMirror(factory: () -> AudioMirror) {
+            try {
+                mirror = factory()
+            } catch (error: Exception) {
+                onMirrorFailure(error)
+            }
+        }
+
+        fun write(samples: ShortArray, length: Int) {
+            sink.write(samples, length)
+            val current = mirror ?: return
+            try {
+                current.write(samples, length)
+            } catch (error: Exception) {
+                closeMirror()
+                onMirrorFailure(error)
+            }
+        }
+
+        fun closeAndGetFile(): File {
+            return try {
+                sink.closeAndGetFile()
+            } finally {
+                closeMirror()
+            }
+        }
+
+        private fun closeMirror() {
+            val current = mirror ?: return
+            mirror = null
+            try {
+                current.close()
+            } catch (error: Exception) {
+                onMirrorFailure(error)
+            }
+        }
+    }
+
     internal class WavSink(
         private val file: File,
         private val sampleRate: Int,
     ) {
         private val output = RandomAccessFile(file, "rw")
-        private val lock = output.channel.lock()
+        private val lock = try {
+            output.channel.lock()
+        } catch (error: Exception) {
+            output.close()
+            throw error
+        }
         private var pcmBytes = 0L
         private var closed = false
 
@@ -511,20 +651,20 @@ class RecorderService : Service() {
         private val context: android.content.Context,
         private val finalName: String,
         private val sampleRate: Int,
-    ) {
+    ) : AudioMirror {
         private var part = 1
         private var pcmBytes = 0L
         private var closed = false
         private var sink = newSink()
 
-        fun write(samples: ShortArray, length: Int) {
+        override fun write(samples: ShortArray, length: Int) {
             if (closed) return
             sink.write(samples, length)
             pcmBytes += length * 2L
             if (pcmBytes >= LIVE_PART_SECONDS * sampleRate * 2L) rotate()
         }
 
-        fun close() {
+        override fun close() {
             if (closed) return
             closed = true
             finishCurrent()
@@ -550,6 +690,7 @@ class RecorderService : Service() {
 
     companion object {
         private val activeService = AtomicReference<Any?>()
+        private val serviceStateLock = Any()
         val isRunning: Boolean get() = activeService.get() != null
         const val ACTION_START = "pl.lisu188.speechrecorder.START"
         const val ACTION_STOP = "pl.lisu188.speechrecorder.STOP"
@@ -557,6 +698,8 @@ class RecorderService : Service() {
         const val EXTRA_LEVEL = "level"
         const val EXTRA_SPEECH = "speech"
         const val EXTRA_LAST_SPEECH = "last_speech"
+        const val KEY_CAPTURE_SILENCED = "capture_silenced"
+        const val MICROPHONE_SILENCED_MESSAGE = "Android wyciszył mikrofon, ponieważ korzysta z niego inna aplikacja lub trwa rozmowa. Nasłuch wznowi się automatycznie po zwolnieniu mikrofonu."
 
         private const val PREFS = "recorder"
         private const val CHANNEL_ID = "speech_recorder_background"
