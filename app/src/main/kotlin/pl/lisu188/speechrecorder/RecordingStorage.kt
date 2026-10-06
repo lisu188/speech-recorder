@@ -633,7 +633,10 @@ object RecordingStorage {
             throw IOException("OneDrive write was incomplete")
         }
         val remoteSize = awaitRemoteSize(context, target, expectedSize)
-        if (!remoteSizeMatches(expectedSize, remoteSize)) {
+        val state = CloudFolderAccess.documentState(context, target)
+        if (!remoteSizeMatches(expectedSize, remoteSize) || state == null || state.partial ||
+            !remoteSizeMatches(expectedSize, state.sizeBytes)
+        ) {
             throw IOException("OneDrive file size verification failed")
         }
     }
