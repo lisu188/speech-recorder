@@ -1,12 +1,14 @@
 package pl.lisu188.speechrecorder
 
 import android.content.Context
+import android.content.ContentResolver
 import android.content.Intent
 import android.content.pm.ProviderInfo
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.CancellationSignal
+import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
@@ -25,6 +27,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
 import org.robolectric.shadows.ShadowContentResolver
 import java.io.File
 import java.io.FileNotFoundException
@@ -40,7 +44,7 @@ import java.util.zip.ZipFile
 import kotlin.concurrent.thread
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], shadows = [StorageTransactionRegressionTest.StorageContentResolverShadow::class])
 class StorageTransactionRegressionTest {
     private lateinit var context: Context
     private lateinit var provider: StorageDocumentsProvider
@@ -489,6 +493,46 @@ class StorageTransactionRegressionTest {
                     }.toTypedArray<Any?>())
                 }
             }
+        }
+    }
+
+    @Implements(ContentResolver::class)
+    class StorageContentResolverShadow : ShadowContentResolver() {
+        @Implementation
+        override fun query(
+            uri: Uri,
+            projection: Array<String>?,
+            selection: String?,
+            selectionArgs: Array<String>?,
+            sortOrder: String?,
+        ): Cursor? = queryProvider(uri, projection, selection, selectionArgs, sortOrder, null)
+
+        @Implementation
+        override fun query(
+            uri: Uri,
+            projection: Array<String>?,
+            selection: String?,
+            selectionArgs: Array<String>?,
+            sortOrder: String?,
+            cancellationSignal: CancellationSignal?,
+        ): Cursor? = queryProvider(uri, projection, selection, selectionArgs, sortOrder, cancellationSignal)
+
+        private fun queryProvider(
+            uri: Uri,
+            projection: Array<String>?,
+            selection: String?,
+            selectionArgs: Array<String>?,
+            sortOrder: String?,
+            cancellationSignal: CancellationSignal?,
+        ): Cursor? {
+            val provider = ShadowContentResolver.getProvider(uri)
+                ?: return super.query(uri, projection, selection, selectionArgs, sortOrder, cancellationSignal)
+            val args = Bundle().apply {
+                putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, selectionArgs)
+                putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, sortOrder)
+            }
+            return provider.query(uri, projection, args, cancellationSignal)
         }
     }
 

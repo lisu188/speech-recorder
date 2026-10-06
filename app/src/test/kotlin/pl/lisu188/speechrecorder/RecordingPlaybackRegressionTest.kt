@@ -103,6 +103,7 @@ class RecordingPlaybackRegressionTest {
     @Test fun sourceFailureCreatesNoPlayerAndReportsOneError() {
         provider.failOpen = true
         playback.toggle(uri)
+        assertTrue(provider.openEntered.await(5, TimeUnit.SECONDS))
         awaitMain { errors == 1 }
         assertTrue(players.isEmpty())
         assertEquals(null to null, states.last())
@@ -386,6 +387,16 @@ class RecordingPlaybackRegressionTest {
                 openFinished.countDown()
             }
         }
+
+        override fun openAssetFile(uri: Uri, mode: String): AssetFileDescriptor =
+            openAssetFile(uri, mode, null)
+
+        override fun openTypedAssetFile(
+            uri: Uri,
+            mimeTypeFilter: String,
+            opts: Bundle?,
+            signal: CancellationSignal?,
+        ): AssetFileDescriptor = openAssetFile(uri, "r", signal)
 
         override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
             if (method != "android:deleteDocument") return super.call(method, arg, extras)
