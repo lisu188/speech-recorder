@@ -77,14 +77,6 @@ class MainActivity : ComponentActivity() {
             if (intent?.action != RecorderService.ACTION_LEVEL) return
             currentLevel = intent.getIntExtra(RecorderService.EXTRA_LEVEL, 0)
             speechActive = intent.getBooleanExtra(RecorderService.EXTRA_SPEECH, false)
-            intent.getLongExtra(RecorderService.EXTRA_LAST_SPEECH, 0L)
-                .takeIf { it > 0L }
-                ?.let {
-                    getSharedPreferences(PREFS, MODE_PRIVATE)
-                        .edit()
-                        .putLong("last_speech", it)
-                        .apply()
-                }
             renderState()
         }
     }
@@ -147,13 +139,15 @@ class MainActivity : ComponentActivity() {
 
     private fun renderState() {
         val running = prefs().getBoolean("enabled", false) && RecorderService.isRunning
+        val microphoneSilenced = running && prefs().getBoolean(RecorderService.KEY_CAPTURE_SILENCED, false)
         val last = prefs().getLong("last_speech", 0L)
         speechActive = running && prefs().getBoolean("speech_active", false)
-        if (!running) currentLevel = 0
+        if (!running || microphoneSilenced) currentLevel = 0
 
         screenState.value = RecorderScreenState(
             mode = when {
                 !running -> RecorderMode.STOPPED
+                microphoneSilenced -> RecorderMode.INTERRUPTED
                 speechActive -> RecorderMode.RECORDING
                 else -> RecorderMode.LISTENING
             },
@@ -164,6 +158,7 @@ class MainActivity : ComponentActivity() {
                 null
             },
             error = listOfNotNull(
+                RecorderService.MICROPHONE_SILENCED_MESSAGE.takeIf { microphoneSilenced },
                 prefs().getString("capture_error", null),
                 prefs().getString("storage_error", null),
             ).joinToString("\n").ifBlank { null },
@@ -216,13 +211,14 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class RecorderMode {
+internal enum class RecorderMode {
     STOPPED,
     LISTENING,
     RECORDING,
+    INTERRUPTED,
 }
 
-private data class RecorderScreenState(
+internal data class RecorderScreenState(
     val mode: RecorderMode = RecorderMode.STOPPED,
     val level: Int = 0,
     val lastSpeech: String? = null,
@@ -321,6 +317,7 @@ private fun RecorderStatusCard(state: RecorderScreenState) {
             RecorderMode.RECORDING -> MaterialTheme.colorScheme.primaryContainer
             RecorderMode.LISTENING -> MaterialTheme.colorScheme.secondaryContainer
             RecorderMode.STOPPED -> MaterialTheme.colorScheme.surfaceContainerHigh
+            RecorderMode.INTERRUPTED -> MaterialTheme.colorScheme.errorContainer
         },
         label = "statusContainer",
     )
@@ -328,6 +325,7 @@ private fun RecorderStatusCard(state: RecorderScreenState) {
         RecorderMode.RECORDING -> MaterialTheme.colorScheme.onPrimaryContainer
         RecorderMode.LISTENING -> MaterialTheme.colorScheme.onSecondaryContainer
         RecorderMode.STOPPED -> MaterialTheme.colorScheme.onSurface
+        RecorderMode.INTERRUPTED -> MaterialTheme.colorScheme.onErrorContainer
     }
     val animatedLevel = animateFloatAsState(
         targetValue = state.level / 100f,
@@ -359,6 +357,7 @@ private fun RecorderStatusCard(state: RecorderScreenState) {
                                 RecorderMode.RECORDING -> Icons.Rounded.GraphicEq
                                 RecorderMode.LISTENING -> Icons.Rounded.Mic
                                 RecorderMode.STOPPED -> Icons.Outlined.MicNone
+                                RecorderMode.INTERRUPTED -> Icons.Outlined.ErrorOutline
                             },
                             contentDescription = null,
                             modifier = Modifier.size(28.dp),
@@ -375,6 +374,7 @@ private fun RecorderStatusCard(state: RecorderScreenState) {
                             RecorderMode.RECORDING -> "Nagrywanie mowy"
                             RecorderMode.LISTENING -> "Nasłuchiwanie"
                             RecorderMode.STOPPED -> "Zatrzymane"
+                            RecorderMode.INTERRUPTED -> "Mikrofon wyciszony przez Android"
                         },
                         style = MaterialTheme.typography.headlineSmall,
                         color = content,
@@ -384,6 +384,7 @@ private fun RecorderStatusCard(state: RecorderScreenState) {
                             RecorderMode.RECORDING -> "Wykryto głos — zapisuję bieżący fragment"
                             RecorderMode.LISTENING -> "Mikrofon aktywny, czekam na mowę"
                             RecorderMode.STOPPED -> "Mikrofon nie jest aktywny"
+                            RecorderMode.INTERRUPTED -> "Czekam na zwolnienie mikrofonu"
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = content.copy(alpha = 0.78f),

@@ -1,13 +1,21 @@
-name: Build Speech Recorder Release
+name: Build and Verify Speech Recorder
 
 on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      require_signed_delivery:
+        description: Deliver both installable APK variants with their original signing keys
+        type: boolean
+        required: true
+        default: true
 
 permissions:
   contents: read
@@ -47,6 +55,7 @@ jobs:
       - name: Test and build release APK
         run: |
           bash -n scripts/sign-apk.sh
+          bash scripts/test-sign-apk.sh
           gradle --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease :app:assembleStandalone
 
       - uses: actions/upload-artifact@v4
@@ -83,8 +92,37 @@ jobs:
           path: SpeechRecorder-release-unsigned.apk
           if-no-files-found: error
 
-      - name: Sign configured variants with their existing keys
-        if: github.event_name != 'pull_request'
+      - name: Describe validation artifacts
+        run: echo 'Build validation passed. Unsigned APKs are build inputs; installable APKs are produced only by the signed-delivery job.' >> "$GITHUB_STEP_SUMMARY"
+
+  signed-delivery:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.require_signed_delivery)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: SpeechRecorder-APK-Signer
+          path: signing-tools
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: SpeechRecorder-Release-Unsigned
+          path: unsigned/release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: SpeechRecorder-Standalone-Unsigned
+          path: unsigned/standalone
+
+      - name: Require both existing signing keys and verify delivery
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
@@ -95,50 +133,58 @@ jobs:
           STANDALONE_KEY_ALIAS: ${{ secrets.STANDALONE_KEY_ALIAS }}
           STANDALONE_KEY_PASSWORD: ${{ secrets.STANDALONE_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           umask 077
           key_dir=$(mktemp -d)
           trap 'rm -rf "$key_dir"' EXIT
+          export APKSIGNER_JAR="$GITHUB_WORKSPACE/signing-tools/apksigner.jar"
+          mkdir delivery
           for variant in release standalone; do
             prefix=${variant^^}
             key_name="${prefix}_KEYSTORE_BASE64"
             password_name="${prefix}_KEYSTORE_PASSWORD"
             alias_name="${prefix}_KEY_ALIAS"
             key_password_name="${prefix}_KEY_PASSWORD"
-            if [ -z "${!key_name}${!password_name}${!alias_name}${!key_password_name}" ]; then
-              echo "::warning::$variant APK is unsigned: its existing signing key is not configured."
-              echo "- $variant: unsigned; existing signing key not configured." >> "$GITHUB_STEP_SUMMARY"
-              continue
-            fi
             if [ -z "${!key_name}" ] || [ -z "${!password_name}" ] || [ -z "${!alias_name}" ] || [ -z "${!key_password_name}" ]; then
-              echo "::error::Incomplete $variant signing configuration."
+              echo "::error::Signed delivery requires all four existing $variant signing secrets."
               exit 1
             fi
+          done
+          for variant in release standalone; do
+            prefix=${variant^^}
+            key_name="${prefix}_KEYSTORE_BASE64"
+            password_name="${prefix}_KEYSTORE_PASSWORD"
+            alias_name="${prefix}_KEY_ALIAS"
+            key_password_name="${prefix}_KEY_PASSWORD"
             export SIGNING_KEYSTORE_PATH="$key_dir/$variant.p12"
             export SIGNING_KEYSTORE_PASSWORD="${!password_name}"
             export SIGNING_KEY_ALIAS="${!alias_name}"
             export SIGNING_KEY_PASSWORD="${!key_password_name}"
             printf '%s' "${!key_name}" | base64 --decode > "$SIGNING_KEYSTORE_PATH"
+            if [ "$variant" = release ]; then
+              input="unsigned/release/SpeechRecorder-release-unsigned.apk"
+            else
+              input="unsigned/standalone/app-standalone-unsigned.apk"
+            fi
             bash scripts/sign-apk.sh "$variant" \
-              "app/build/outputs/apk/$variant/app-$variant-unsigned.apk" \
-              "SpeechRecorder-$variant.apk"
+              "$input" "delivery/SpeechRecorder-$variant.apk"
             rm -f "$SIGNING_KEYSTORE_PATH"
-            echo "- $variant: signed and certificate verified." >> "$GITHUB_STEP_SUMMARY"
           done
+          (cd delivery && sha256sum --check *.sha256)
+          echo 'Both APK variants passed signature verification and match their pinned existing certificates.' >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request' && hashFiles('SpeechRecorder-release.apk') != ''
         with:
           name: SpeechRecorder-Release-Signed
           path: |
-            SpeechRecorder-release.apk
-            SpeechRecorder-release.apk.sha256
+            delivery/SpeechRecorder-release.apk
+            delivery/SpeechRecorder-release.apk.sha256
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request' && hashFiles('SpeechRecorder-standalone.apk') != ''
         with:
           name: SpeechRecorder-Standalone-Signed
           path: |
-            SpeechRecorder-standalone.apk
-            SpeechRecorder-standalone.apk.sha256
+            delivery/SpeechRecorder-standalone.apk
+            delivery/SpeechRecorder-standalone.apk.sha256
           if-no-files-found: error

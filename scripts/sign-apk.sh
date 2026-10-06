@@ -16,14 +16,22 @@ esac
 : "${SIGNING_KEY_PASSWORD:?Set SIGNING_KEY_PASSWORD}"
 [[ -f "$input" && -f "$SIGNING_KEYSTORE_PATH" ]] || { echo "Input APK or keystore missing" >&2; exit 2; }
 [[ "$(realpath -m "$input")" != "$(realpath -m "$output")" ]] || { echo "Input and output must differ" >&2; exit 2; }
-[[ ! -e "$output" ]] || { echo "Output already exists; choose a new path" >&2; exit 2; }
+[[ ! -e "$output" && ! -L "$output" && ! -e "$output.sha256" && ! -L "$output.sha256" ]] || { echo "Output or checksum already exists; choose a new path" >&2; exit 2; }
 if [[ -n "${APKSIGNER_JAR:-}" ]]; then
   signer=(java -jar "$APKSIGNER_JAR")
 else
   signer=("${APKSIGNER:-${ANDROID_HOME:?Set ANDROID_HOME, APKSIGNER or APKSIGNER_JAR}/build-tools/37.0.0/apksigner}")
 fi
 work="$(mktemp -d "$(dirname "$output")/.speech-recorder-sign.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
+published=0
+complete=0
+cleanup() {
+  if [[ "$complete" -eq 0 && "$published" -eq 1 && "$output" -ef "$work/signed.apk" ]]; then
+    rm -f -- "$output"
+  fi
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
 "${signer[@]}" sign \
   --ks "$SIGNING_KEYSTORE_PATH" \
   --ks-key-alias "$SIGNING_KEY_ALIAS" \
@@ -31,13 +39,18 @@ trap 'rm -rf "$work"' EXIT
   --key-pass env:SIGNING_KEY_PASSWORD \
   --out "$work/signed.apk" "$input"
 verification="$("${signer[@]}" verify --verbose --print-certs "$work/signed.apk")"
-actual="$(printf '%s\n' "$verification" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1 | tr '[:upper:]' '[:lower:]')"
+actual="$(printf '%s\n' "$verification" | sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' | tr '[:upper:]' '[:lower:]')"
 [[ "$actual" == "$expected" ]] || {
   echo "Refusing APK signed with the wrong certificate: $actual" >&2
   echo "Required $variant certificate: $expected" >&2
   exit 1
 }
 printf '%s\n' "$verification"
-mv "$work/signed.apk" "$output"
-sha256sum "$output" > "$output.sha256"
+[[ -s "$work/signed.apk" ]] || { echo "Signer produced an empty APK" >&2; exit 1; }
+checksum="$(sha256sum "$work/signed.apk")"
+printf '%s  %s\n' "${checksum%% *}" "$(basename "$output")" > "$work/signed.apk.sha256"
+ln -T -- "$work/signed.apk" "$output"
+published=1
+ln -T -- "$work/signed.apk.sha256" "$output.sha256"
+complete=1
 echo "Verified $variant APK: $output"
