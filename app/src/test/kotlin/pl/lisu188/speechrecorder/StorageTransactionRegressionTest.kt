@@ -184,6 +184,14 @@ class StorageTransactionRegressionTest {
         assertNotNull(provider.find("root", name))
     }
 
+    @Test fun corruptCentralDirectoryCrcCannotPassArchiveContentVerification() {
+        provider.add("root", name, wav(ByteArray(6400) { (it % 251).toByte() }))
+        provider.corruptCentralCrcReads = true
+        assertFalse(RecordingStorage.archiveRecording(context, RecordingStorage.listPublished(context).single()))
+        assertNotNull(provider.find("root", name))
+        assertNotNull(provider.find("root", "$name.zip"))
+    }
+
     @Test fun verifiedArchiveContainsEverySourceByteBeforeSourceDeletion() {
         val original = wav(ByteArray(6400) { (it % 251).toByte() })
         provider.add("root", name, original)
@@ -361,6 +369,7 @@ class StorageTransactionRegressionTest {
         var failReceiptWrites = false
         var failRecordingWrites = false
         var corruptArchiveReads = false
+        var corruptCentralCrcReads = false
         var corruptReceiptReads = false
         var shortReadDocument: String? = null
         var onOpen: ((Node, String) -> Unit)? = null
@@ -429,12 +438,24 @@ class StorageTransactionRegressionTest {
                 throw FileNotFoundException("Injected write failure")
             }
             val original = node.file ?: throw FileNotFoundException(documentId)
-            val file = if (!mode.contains('w') && (shortReadDocument == documentId || corruptArchiveReads && node.name.endsWith(".zip") ||
+            val file = if (!mode.contains('w') && (shortReadDocument == documentId ||
+                    (corruptArchiveReads || corruptCentralCrcReads) && node.name.endsWith(".zip") ||
                     corruptReceiptReads && node.name.startsWith("commit_"))) {
                 File.createTempFile("readback-", ".bin", files).apply {
                     val bytes = original.readBytes()
                     writeBytes(if (shortReadDocument == documentId) bytes.copyOf(bytes.size / 2) else bytes.apply {
-                        val index = if (node.name.startsWith("commit_")) 0 else 40
+                        val index = when {
+                            node.name.startsWith("commit_") -> 0
+                            corruptCentralCrcReads -> (0 until size - 20).first {
+                                this[it] == 0x50.toByte() && this[it + 1] == 0x4b.toByte() &&
+                                    this[it + 2] == 0x01.toByte() && this[it + 3] == 0x02.toByte()
+                            } + 16
+                            else -> {
+                                val nameLength = (this[26].toInt() and 255) or ((this[27].toInt() and 255) shl 8)
+                                val extraLength = (this[28].toInt() and 255) or ((this[29].toInt() and 255) shl 8)
+                                30 + nameLength + extraLength + 4
+                            }
+                        }
                         if (size > index) this[index] = (this[index].toInt() xor 1).toByte()
                     })
                 }
@@ -465,7 +486,7 @@ class StorageTransactionRegressionTest {
                                 (if (node.partial) DocumentsContract.Document.FLAG_PARTIAL else 0)
                             else -> null
                         }
-                    }.toTypedArray())
+                    }.toTypedArray<Any?>())
                 }
             }
         }

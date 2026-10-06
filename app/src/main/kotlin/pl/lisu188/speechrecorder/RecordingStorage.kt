@@ -35,6 +35,7 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.zip.Deflater
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import java.util.zip.ZipFile
@@ -559,6 +560,7 @@ object RecordingStorage {
                     throw IOException("Archive entry verification failed")
                 }
                 val digest = MessageDigest.getInstance("SHA-256")
+                val crc = CRC32()
                 val extracted = zip.getInputStream(entries[0]).use { input ->
                     DigestInputStream(input, digest).use { source ->
                         var bytes = 0L
@@ -566,12 +568,15 @@ object RecordingStorage {
                         while (true) {
                             val read = source.read(buffer)
                             if (read < 0) break
+                            crc.update(buffer, 0, read)
                             bytes += read
                         }
                         bytes
                     }
                 }
-                if (extracted != expectedSize || !MessageDigest.isEqual(expectedDigest, digest.digest())) {
+                if (extracted != expectedSize || crc.value != entries[0].crc ||
+                    !MessageDigest.isEqual(expectedDigest, digest.digest())
+                ) {
                     throw IOException("Archive content verification failed")
                 }
             }

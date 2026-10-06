@@ -40,7 +40,6 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.android.controller.ServiceController
-import org.robolectric.shadows.ShadowAudioRecord
 import org.robolectric.util.ReflectionHelpers
 
 @RunWith(RobolectricTestRunner::class)
@@ -318,7 +317,15 @@ class RecorderLifecycleTest {
 }
 
 @Implements(AudioRecord::class)
-class RecordingMonitorShadow : ShadowAudioRecord() {
+class RecordingMonitorShadow {
+    @Implementation fun __constructor__(source: Int, sampleRate: Int, channelMask: Int, encoding: Int, bufferSize: Int) = Unit
+
+    @Implementation fun getAudioSessionId(): Int = 42
+
+    @Implementation fun stop() = Unit
+
+    @Implementation fun release() = Unit
+
     @Implementation fun getActiveRecordingConfiguration(): AudioRecordingConfiguration? = configuration
 
     @Implementation fun registerAudioRecordingCallback(executor: Executor, recordingCallback: AudioManager.AudioRecordingCallback) {

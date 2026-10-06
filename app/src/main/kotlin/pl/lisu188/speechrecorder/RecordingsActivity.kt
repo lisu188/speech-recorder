@@ -353,15 +353,19 @@ class RecordingsActivity : ComponentActivity() {
             if (!Thread.currentThread().isInterrupted) runOnUiThread {
                 if (!uiDestroyed) {
                     deletionTasks.remove(uri)
+                    if (deleted) recordings = recordings.filterNot { it.uri == uri }
                     screenState.value = screenState.value.copy(
+                        visible = if (deleted) screenState.value.visible.filterNot { it.uri == uri } else screenState.value.visible,
                         deletingUris = screenState.value.deletingUris - uri,
                     )
-                    Toast.makeText(
-                        this,
-                        if (deleted) "Nagranie usunięte z OneDrive" else "Nie udało się usunąć nagrania z OneDrive",
-                        if (deleted) Toast.LENGTH_SHORT else Toast.LENGTH_LONG,
-                    ).show()
-                    if (deleted) loadRecordings()
+                    if (libraryReceiverRegistered) {
+                        Toast.makeText(
+                            this,
+                            if (deleted) "Nagranie usunięte z OneDrive" else "Nie udało się usunąć nagrania z OneDrive",
+                            if (deleted) Toast.LENGTH_SHORT else Toast.LENGTH_LONG,
+                        ).show()
+                        if (deleted) loadRecordings()
+                    }
                 }
             }
         }
