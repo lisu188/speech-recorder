@@ -29,7 +29,6 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
-import org.robolectric.shadows.ShadowContentResolver
 import org.robolectric.shadows.ShadowToast
 import java.io.File
 import java.io.IOException
@@ -47,6 +46,7 @@ class RecordingPlaybackRegressionTest {
     private val executor = Executors.newSingleThreadExecutor()
     private val players = mutableListOf<FakePlayer>()
     private val states = mutableListOf<Pair<Uri?, Uri?>>()
+    private val acquisitionFailures = CopyOnWriteArrayList<Exception>()
     private var errors = 0
     private var failure: Failure? = null
     private lateinit var playback: RecordingPlaybackController
@@ -56,14 +56,18 @@ class RecordingPlaybackRegressionTest {
         context = RuntimeEnvironment.getApplication()
         context.getSharedPreferences("storage_settings", Context.MODE_PRIVATE).edit().clear().commit()
         ShadowToast.reset()
-        provider = DelayedProvider().apply {
-            attachInfo(context, ProviderInfo().apply { authority = AUTHORITY })
-        }
-        ShadowContentResolver.registerProviderInternal(AUTHORITY, provider)
+        provider = Robolectric.buildContentProvider(DelayedProvider::class.java)
+            .create(ProviderInfo().apply { authority = AUTHORITY })
+            .get()
         playback = RecordingPlaybackController(
             executor = executor,
             acquireSource = { source, cancellation ->
-                context.contentResolver.openAssetFileDescriptor(source, "r", cancellation)
+                try {
+                    context.contentResolver.openAssetFileDescriptor(source, "r", cancellation)
+                } catch (error: Exception) {
+                    acquisitionFailures += error
+                    throw error
+                }
             },
             onState = { preparing, playing -> states += preparing to playing },
             onError = { errors++ },
@@ -83,7 +87,7 @@ class RecordingPlaybackRegressionTest {
     @Test fun delayedProviderDoesNotBlockMainAndPlayerHasOneOwningThread() {
         provider.blockOpen = true
         playback.toggle(uri)
-        assertTrue(provider.openEntered.await(5, TimeUnit.SECONDS))
+        assertProviderEntered()
         assertNotEquals(Looper.getMainLooper().thread, provider.openThread)
         assertEquals(uri to null, states.last())
         assertTrue(players.isEmpty())
@@ -103,7 +107,7 @@ class RecordingPlaybackRegressionTest {
     @Test fun sourceFailureCreatesNoPlayerAndReportsOneError() {
         provider.failOpen = true
         playback.toggle(uri)
-        assertTrue(provider.openEntered.await(5, TimeUnit.SECONDS))
+        assertProviderEntered()
         awaitMain { errors == 1 }
         assertTrue(players.isEmpty())
         assertEquals(null to null, states.last())
@@ -186,7 +190,7 @@ class RecordingPlaybackRegressionTest {
     @Test fun destroyCancelsProviderAcquisitionAndSuppressesLateCallbacks() {
         provider.blockOpen = true
         playback.toggle(uri)
-        assertTrue(provider.openEntered.await(5, TimeUnit.SECONDS))
+        assertProviderEntered()
         playback.close()
         val stateCount = states.size
         assertTrue(provider.cancelled.await(5, TimeUnit.SECONDS))
@@ -266,6 +270,11 @@ class RecordingPlaybackRegressionTest {
         Handler(Looper.getMainLooper()).post { dispatched = true }
         shadowOf(Looper.getMainLooper()).idle()
         assertTrue(dispatched)
+    }
+
+    private fun assertProviderEntered() {
+        val entered = provider.openEntered.await(5, TimeUnit.SECONDS)
+        assertTrue("Provider not entered: ${acquisitionFailures.joinToString { it.stackTraceToString() }}", entered)
     }
 
     private fun awaitMain(ready: () -> Boolean) {
