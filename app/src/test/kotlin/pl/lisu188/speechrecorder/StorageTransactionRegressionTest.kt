@@ -196,6 +196,14 @@ class StorageTransactionRegressionTest {
         assertNotNull(provider.find("root", "$name.zip"))
     }
 
+    @Test fun partialArchiveDocumentNeverAllowsSourceCleanupAfterSuccessfulReadback() {
+        provider.add("root", name, wav(ByteArray(6400) { (it % 251).toByte() }))
+        provider.partialArchiveWrites = true
+        assertFalse(RecordingStorage.archiveRecording(context, RecordingStorage.listPublished(context).single()))
+        assertNotNull(provider.find("root", name))
+        assertTrue(provider.find("root", "$name.zip")!!.partial)
+    }
+
     @Test fun verifiedArchiveContainsEverySourceByteBeforeSourceDeletion() {
         val original = wav(ByteArray(6400) { (it % 251).toByte() })
         provider.add("root", name, original)
@@ -374,6 +382,7 @@ class StorageTransactionRegressionTest {
         var failRecordingWrites = false
         var corruptArchiveReads = false
         var corruptCentralCrcReads = false
+        var partialArchiveWrites = false
         var corruptReceiptReads = false
         var shortReadDocument: String? = null
         var onOpen: ((Node, String) -> Unit)? = null
@@ -427,7 +436,8 @@ class StorageTransactionRegressionTest {
             onCreate?.invoke(displayName)
             val id = "doc-${files.name}-${ids.incrementAndGet()}"
             val file = if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) null else File(files, id).apply { createNewFile() }
-            nodes[id] = Node(id, parentDocumentId, displayName, mimeType, file)
+            nodes[id] = Node(id, parentDocumentId, displayName, mimeType, file,
+                partial = partialArchiveWrites && mimeType == "application/zip")
             return id
         }
 

@@ -524,6 +524,10 @@ object RecordingStorage {
                 }
                 verifyArchive(context, archiveUri, recording.name, copied, archivedBytes, digest.digest())
                 requireSelectedTree(context, tree)
+                val archiveState = CloudFolderAccess.documentState(context, archiveUri)
+                if (archiveState == null || archiveState.partial || archiveState.sizeBytes != archivedBytes) {
+                    throw IOException("Archive document is incomplete before cleanup")
+                }
                 val after = CloudFolderAccess.documentState(context, recording.uri)
                 if (after == null || after.partial || after.sizeBytes != expectedSize || after.lastModifiedMs != before.lastModifiedMs) {
                     throw IOException("Archive source changed before cleanup")
