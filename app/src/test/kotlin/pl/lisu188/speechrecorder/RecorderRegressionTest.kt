@@ -33,10 +33,10 @@ class RecorderRegressionTest {
         Robolectric.buildActivity(RecordingsActivity::class.java).create().start().resume().pause().stop().destroy()
     }
 
-    @Test fun appDoesNotRequestInternetOrNotificationPermission() {
+    @Test fun appRequestsInternetOnlyForDriveButNotNotifications() {
         val info = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
         val requested = info.requestedPermissions.orEmpty().toSet()
-        assertFalse("INTERNET must stay removed", Manifest.permission.INTERNET in requested)
+        assertTrue("Google Drive requires INTERNET", Manifest.permission.INTERNET in requested)
         assertFalse("POST_NOTIFICATIONS must stay removed", Manifest.permission.POST_NOTIFICATIONS in requested)
         assertTrue(Manifest.permission.RECORD_AUDIO in requested)
         assertTrue(Manifest.permission.FOREGROUND_SERVICE in requested)
