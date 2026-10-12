@@ -50,6 +50,7 @@ dependencies {
     implementation("androidx.compose.material3:material3-adaptive-navigation-suite")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.work:work-runtime:2.11.2")
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.work:work-testing:2.11.2")
