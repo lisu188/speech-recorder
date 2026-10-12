@@ -479,7 +479,7 @@ class RecorderService : Service() {
     private fun reportMirrorFailure(error: Exception) {
         Log.w("SpeechRecorder", "Live mirror failed; retaining primary recording", error)
         withActiveStatus {
-            prefs().edit().putString("storage_error", "Bieżąca kopia OneDrive została przerwana. Nagranie pozostaje w telefonie i zostanie wysłane po zakończeniu.").apply()
+            prefs().edit().putString("storage_error", "Bieżąca kopia w chmurze została przerwana. Nagranie pozostaje w telefonie i zostanie wysłane po zakończeniu.").apply()
         }
     }
 

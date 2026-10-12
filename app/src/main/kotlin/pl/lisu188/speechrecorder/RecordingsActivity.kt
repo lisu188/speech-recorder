@@ -122,6 +122,9 @@ class RecordingsActivity : ComponentActivity() {
                         state = screenState.value,
                         modifier = Modifier.padding(padding),
                         onRefresh = { loadRecordings() },
+                        onOpenGoogle = {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GoogleDriveBackup.folderLink(this))))
+                        },
                         onQueryChange = { updateFilter(query = it) },
                         onSortChange = { updateFilter(sortIndex = it) },
                         onPlay = { togglePlayback(it) },
@@ -188,6 +191,17 @@ class RecordingsActivity : ComponentActivity() {
     private fun loadRecordings() {
         val generation = ++loadGeneration
         loadTask?.cancel(true)
+        if (GoogleDriveBackup.isSelected(this)) {
+            recordings = emptyList()
+            screenState.value = screenState.value.copy(
+                visible = emptyList(),
+                loading = false,
+                cloudReady = GoogleDriveBackup.isConfigured(this),
+                googleDriveMode = true,
+                error = null,
+            )
+            return
+        }
         if (!CloudFolderAccess.hasAccess(this)) {
             recordings = emptyList()
             screenState.value = screenState.value.copy(
@@ -559,6 +573,7 @@ private data class RecordingsScreenState(
     val sortIndex: Int = 0,
     val loading: Boolean = false,
     val cloudReady: Boolean = true,
+    val googleDriveMode: Boolean = false,
     val playingUri: Uri? = null,
     val preparingUri: Uri? = null,
     val deletingUris: Set<Uri> = emptySet(),
@@ -571,6 +586,7 @@ private fun RecordingsScreen(
     state: RecordingsScreenState,
     modifier: Modifier = Modifier,
     onRefresh: () -> Unit,
+    onOpenGoogle: () -> Unit,
     onQueryChange: (String) -> Unit,
     onSortChange: (Int) -> Unit,
     onPlay: (Recording) -> Unit,
@@ -610,7 +626,9 @@ private fun RecordingsScreen(
             ) {
                 PageHeader(
                     title = "Nagrania",
-                    subtitle = if (state.cloudReady) {
+                    subtitle = if (state.googleDriveMode) {
+                        "Nagrania są wysyłane do folderu SpeechRecorder na Google Drive."
+                    } else if (state.cloudReady) {
                         recordingSummary(state.visible)
                     } else {
                         "Wybierz folder OneDrive w Ustawieniach."
@@ -633,7 +651,20 @@ private fun RecordingsScreen(
             }
         }
 
-        if (!state.cloudReady) {
+        if (state.googleDriveMode) {
+            item {
+                EmptyRecordingsCard(
+                    icon = Icons.Outlined.LibraryMusic,
+                    title = "Nagrania w Google Drive",
+                    body = "Otwórz folder SpeechRecorder w Google Drive, aby zobaczyć i odtworzyć nagrania. Przeglądarka wewnętrzna obsługuje obecnie OneDrive.",
+                )
+            }
+            item {
+                TextButton(onClick = onOpenGoogle, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text("Otwórz Google Drive")
+                }
+            }
+        } else if (!state.cloudReady) {
             item {
                 EmptyRecordingsCard(
                     icon = Icons.Outlined.CloudOff,

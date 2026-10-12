@@ -125,6 +125,16 @@ class RecordingStorageTest {
         assertArrayEquals(original, file.readBytes())
     }
 
+    @Test fun googleDriveRecordingIsRetainedUntilAccountIsAuthorized() {
+        context.getSharedPreferences("storage_settings", Context.MODE_PRIVATE).edit()
+            .putString("recording_cloud_provider", "google_drive").commit()
+        val file = recording()
+        val original = file.readBytes()
+        assertEquals(ListenableWorker.Result.retry(), worker(file.name).doWork())
+        assertTrue(file.exists())
+        assertArrayEquals(original, file.readBytes())
+    }
+
     @Test fun legacyCacheAndFallbackFilesAreMigratedWithoutOverwriting() {
         val first = File(context.cacheDir, "speech_legacy.wav").apply { writeBytes(wav(byteArrayOf(1, 2))) }
         val fallback = File(context.getExternalFilesDir(android.os.Environment.DIRECTORY_MUSIC), "SpeechRecorder")
