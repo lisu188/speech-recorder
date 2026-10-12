@@ -1,5 +1,6 @@
 package pl.lisu188.speechrecorder
 
+import android.accounts.Account
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
@@ -50,6 +51,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.auth.api.identity.RevokeAccessRequest
+import com.google.android.gms.common.Scopes
+import com.google.android.gms.common.api.Scope
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 
@@ -110,8 +114,19 @@ class SettingsActivity : ComponentActivity() {
     }
 
     private fun disconnectGoogleDrive() {
+        val email = GoogleDriveBackup.account(this)
         GoogleDriveBackup.disconnect(this)
         refreshState()
+        if (email != null) {
+            val request = RevokeAccessRequest.builder()
+                .setAccount(Account(email, "com.google"))
+                .setScopes(listOf(Scope(Scopes.DRIVE_FILE), Scope(Scopes.EMAIL)))
+                .build()
+            Identity.getAuthorizationClient(this).revokeAccess(request)
+                .addOnFailureListener {
+                    Toast.makeText(this, "Odłączono lokalnie. Cofnij też zgodę w ustawieniach konta Google.", Toast.LENGTH_LONG).show()
+                }
+        }
     }
 
     private fun openGoogleDrive() {
@@ -455,7 +470,7 @@ private fun SettingsScreen(
                     icon = Icons.Outlined.Security,
                     title = "Audio bez usług AI",
                     body = if (state.googleSelected) {
-                        "Brak OpenAI i transkrypcji. Aplikacja używa tylko uprawnienia drive.file, a nagrania wysyła bezpośrednio do Google Drive."
+                        "Brak OpenAI i transkrypcji. Dostęp do Google ogranicza się do drive.file i email; nagrania są wysyłane bezpośrednio przez HTTPS."
                     } else {
                         "Brak OpenAI i transkrypcji. OneDrive jest obsługiwany przez systemowy provider dokumentów."
                     },
