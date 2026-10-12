@@ -1,8 +1,8 @@
 # Speech Recorder
 
-Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VAD działają lokalnie jako foreground service. Zakończone klipy są zapisywane do folderu wybranego w OneDrive przez systemowy Storage Access Framework.
+Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VAD działają lokalnie jako foreground service. Zakończone klipy można zapisywać w Google Drive przez Drive API lub w wybranym folderze OneDrive przez systemowy Storage Access Framework.
 
-## Wersja 1.7.1
+## Wersja 1.8.0
 
 - Kotlin 2.4.10
 - Android Gradle Plugin 9.3.2
@@ -22,15 +22,19 @@ Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VA
 - odzyskiwanie pomija aktywne pliki z blokadą i naprawia nagłówki zamkniętych WAV
 - jawny stan przerwania, gdy Android wyciszy mikrofon na rzecz innej aplikacji lub rozmowy
 - awaria fragmentów bezpieczeństwa nie blokuje zamknięcia głównego WAV
-- zapis nagrań do wybranego folderu OneDrive
+- zapis nagrań do wybranego folderu OneDrive albo do folderu SpeechRecorder na Google Drive
+- autoryzacja Google Drive za pomocą Google Play Services; uprawnienia ograniczone do drive.file i email
+- osobny tryb publikacji WAV do Google Drive z weryfikacją rozmiaru i sumy MD5 przed usunięciem lokalnej kopii
+- bezpieczny zapis 15-sekundowych fragmentów live do folderu SpeechRecorder/__sr_live na Google Drive
+- możliwość przełączania dostawcy w Ustawieniach bez wymuszania migracji ani usuwania nagrań z poprzedniej chmury
 - podczas aktywnego klipu poprawne 15-sekundowe WAV-y bezpieczeństwa są zapisywane w wewnętrznym folderze OneDrive `__sr_live`
 - pełny WAV jest uznawany za poprawnie zapisany dopiero po odczycie i sprawdzeniu receipt oraz ponownej weryfikacji finalnego dokumentu
 - techniczne fragmenty live są usuwane wyłącznie po potwierdzonym finalnym zapisie
 - WAV-y starsze niż 30 dni są automatycznie kompresowane lossless do `.wav.zip` na OneDrive podczas ładowania telefonu; źródło jest usuwane dopiero po pobraniu i sprawdzeniu zawartości archiwum
-- przeglądarka nagrań czytająca bezpośrednio wybrany folder OneDrive
+- przeglądarka nagrań OneDrive; nagrania Google Drive otwiera się obecnie w aplikacji/stronie Google Drive
 - odtwarzanie, mini-waveformy, udostępnianie i usuwanie nagrań
 - migracja wcześniejszych WAV z `Music/SpeechRecorder` po skonfigurowaniu OneDrive
-- brak OpenAI, transkrypcji, kluczy API i uprawnienia `INTERNET`
+- brak OpenAI, transkrypcji i kluczy API; uprawnienie INTERNET jest używane wyłącznie w trybie Google Drive
 - interfejs Jetpack Compose + Material 3
 - dynamic color na Androidzie 12+
 - edge-to-edge z obsługą systemowych insets
@@ -53,19 +57,32 @@ Najważniejsze zmiany:
 - ustawienia pogrupowane według celu użytkownika: przechowywanie, nagrywanie, praca w tle, archiwum i prywatność,
 - odpowiednie opisy dostępności i co najmniej 48 dp dla interaktywnych targetów.
 
-## Pierwsza konfiguracja
+## Pierwsza konfiguracja — Google Drive
+
+1. Utwórz projekt Google Cloud z włączonym Google Drive API i skonfiguruj ekran zgody OAuth.
+2. Zarejestruj klienta OAuth typu Android z identyfikatorem pakietu i certyfikatem SHA-1 podpisu APK. Oba warianty (`release` i `standalone`) wymagają własnych wpisów OAuth. SHA-256 używany do kontroli podpisu w sekcji poniżej nie jest zamiennikiem SHA-1 w konfiguracji klienta.
+3. Otwórz **Ustawienia** w Dyktafonie i wybierz **Połącz Google Drive**.
+4. Wybierz konto Google i zaakceptuj zakres `drive.file` (aplikacja tworzy i widzi tylko pliki własne) oraz email (identyfikacja wybranego konta).
+5. Rozpocznij nagrywanie. Aplikacja utworzy folder `SpeechRecorder` na Moim Dysku po pierwszym przesyłaniu.
+6. Nagrania przeglądaj w Google Drive poprzez przycisk **Otwórz** na ekranie ustawień lub ekranie nagrań.
+
+Dyktafon nie przechowuje tokenów OAuth ani haseł. Uzyskuje krótkotrwałe tokeny od Google Play Services i wysyła nagrania przez połączenia HTTPS. Po utracie uprawnień lub sieci zachowuje lokalne pliki i ponawia przesyłanie przez WorkManager. W trybie Google Drive archiwizacja starszych niż 30 dni nagrań do ZIP oraz wbudowane odtwarzanie chmurowych plików nie są jeszcze obsługiwane.
+
+## Alternatywna konfiguracja — OneDrive
 
 1. Zainstaluj aplikację OneDrive na telefonie i zaloguj się.
 2. Otwórz **Ustawienia** w Dyktafonie.
-3. Wybierz **WYBIERZ FOLDER W ONEDRIVE**.
+3. Wybierz **Wybierz folder** w sekcji OneDrive.
 4. W systemowym selektorze dokumentów przejdź do OneDrive i wybierz folder, np. `SpeechRecorder`.
-5. Wróć do ekranu **Dyktafon** i wybierz **ROZPOCZNIJ**.
+5. Wróć do ekranu **Dyktafon** i wybierz **Rozpocznij nasłuch**.
 
 Aplikacja zapamiętuje persistowalne uprawnienie do wybranego drzewa dokumentów. Nie przechowuje hasła ani tokenu Microsoft. Dostęp do konta i synchronizację sieciową realizuje provider dokumentów OneDrive.
 
 ## Bezpieczeństwo zapisu
 
-Aktywny klip jest zapisywany w trwałym prywatnym katalogu aplikacji. Równolegle aplikacja zamyka co 15 sekund poprawny techniczny fragment WAV i natychmiast przekazuje go do providera OneDrive w dedykowanej szeregowej kolejce I/O. WorkManager służy jako fallback po błędzie oraz do odzyskiwania plików po restarcie procesu. Fragmenty trafiają do wewnętrznego podfolderu `__sr_live`, dzięki czemu nie wymagają wielokrotnego skanowania całej biblioteki nagrań.
+W trybie Google Drive zakończony WAV lub fragment live jest przesyłany jako plik utworzony przez aplikację z użyciem resumable upload. Zanim lokalna kopia zostanie usunięta, serwerowe metadane muszą potwierdzić nazwę, rozmiar i MD5 przesłanego pliku. W razie błędu, utraty połączenia lub wymaganej ponownej zgody Google dane pozostają na telefonie. Podczas odzyskiwania aplikacja wyszukuje nagranie po nazwie i weryfikuje jego zawartość przed ponownym wysłaniem, co ogranicza duplikaty po przerwaniu przesyłania. Lokalna kopia nie jest usuwana na podstawie samego zakończenia połączenia sieciowego.
+
+W trybie OneDrive aktywny klip jest zapisywany w trwałym prywatnym katalogu aplikacji. Równolegle aplikacja zamyka co 15 sekund poprawny techniczny fragment WAV i natychmiast przekazuje go do providera OneDrive w dedykowanej szeregowej kolejce I/O. WorkManager służy jako fallback po błędzie oraz do odzyskiwania plików po restarcie procesu. Fragmenty trafiają do wewnętrznego podfolderu `__sr_live`, dzięki czemu nie wymagają wielokrotnego skanowania całej biblioteki nagrań.
 
 Po zamknięciu rozmowy aplikacja zapisuje pełny WAV w głównym folderze OneDrive i sprawdza rozmiar pliku raportowany przez provider. Dopiero po zgodności rozmiaru zapisuje osobny receipt `commit_*.ok` w `__sr_live`. Sam fakt istnienia pliku WAV nie jest traktowany jako sukces, więc pusty lub częściowo utworzony dokument po przerwanym uploadzie nie może spowodować skasowania fragmentów bezpieczeństwa. Aplikacja odczytuje zawartość receipt i sprawdza zapisany rozmiar oraz tożsamość finalnego dokumentu. Pusty, niekompletny albo niezgodny receipt nie pozwala usunąć lokalnej kopii. Zapis, odzyskiwanie, archiwizacja i usuwanie tego samego nagrania są synchronizowane, a operacje zachowują tożsamość wybranego folderu podczas całej transakcji. Faktyczny moment wysłania danych z providera do serwerów Microsoft nadal zależy od klienta OneDrive.
 
@@ -73,7 +90,7 @@ Jeżeli OneDrive jest niedostępny, uprawnienie do folderu wygasło albo provide
 
 Po wybraniu folderu OneDrive aplikacja próbuje również przenieść wcześniejsze pliki WAV zapisane w `Music/SpeechRecorder`. Plik źródłowy jest kasowany dopiero po poprawnym skopiowaniu.
 
-## Kompresja starszych nagrań
+## Kompresja starszych nagrań (tylko OneDrive)
 
 WorkManager przegląda starsze WAV-y okresowo, ale archiwizacja może rozpocząć się tylko podczas ładowania urządzenia. Wiek nagrania jest wyznaczany najpierw z daty w nazwie `speech_YYYYMMDD_HHMMSS...`; `lastModified` z OneDrive jest używany wyłącznie jako fallback dla starych nazw. Pliki mające co najmniej 30 dni są strumieniowo pakowane do ZIP/DEFLATE z domyślnym poziomem kompresji, aby ograniczyć obciążenie CPU. Archiwizacja jest dodatkowo serializowana, więc worker okresowy i natychmiastowy nie mogą jednocześnie pisać tego samego ZIP-a. Źródłowy WAV jest usuwany dopiero po sprawdzeniu kompletności wejścia, pobraniu gotowego ZIP-a, sprawdzeniu pojedynczego wpisu i porównaniu SHA-256 rozpakowanego audio z wejściem. Przed usunięciem aplikacja ponownie sprawdza metadane źródła. Dokumenty niekompletne, o nieznanym rozmiarze lub nadal oczekujące lokalnie na publikację są pomijane i zachowywane. Jedno uruchomienie archiwizuje maksymalnie osiem plików.
 
@@ -101,7 +118,7 @@ Nie istnieje zwykły mechanizm aplikacji, który pozwala zagwarantować nagrywan
 
 ## Prywatność
 
-Wersja 1.7.1 nie zawiera integracji OpenAI. Usunięto:
+Wersja 1.8.0 nie zawiera integracji OpenAI. Usunięto:
 
 - klienta OpenAI,
 - przechowywanie klucza API,
@@ -109,10 +126,9 @@ Wersja 1.7.1 nie zawiera integracji OpenAI. Usunięto:
 - generowanie tytułów i podsumowań,
 - pliki checkpointów transkrypcji,
 - dzielenie WAV na fragmenty do STT,
-- uprawnienie `INTERNET`,
 - uprawnienie `POST_NOTIFICATIONS`.
 
-Analiza VAD odbywa się wyłącznie lokalnie. Przesłanie WAV do OneDrive jest wykonywane przez wybrany przez użytkownika systemowy provider dokumentów.
+Analiza VAD odbywa się wyłącznie lokalnie. Przesłanie WAV do OneDrive jest wykonywane przez systemowy provider dokumentów, a do Google Drive przez bezpośrednie HTTPS i ograniczony zakres OAuth `drive.file`. Włączenie Google Drive wymaga świadomej zgody na dostęp do konta.
 
 ## Release signing
 
@@ -129,6 +145,10 @@ Do aktualizacji istniejącej instalacji trzeba użyć dokładnie tego samego klu
 Push do `main` i pull request uruchamiają testy, lint i build; ich niepodpisane APK są wyłącznie wejściem do podpisywania. Instalowalne APK powstają w osobnym jobie `signed-delivery`, uruchamianym przez tag `v*` lub ręczne uruchomienie workflow z `require_signed_delivery=true` (wartość domyślna). Job wymaga dla obu wariantów czterech sekretów o prefiksie `RELEASE_` lub `STANDALONE_`: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`. Brak któregokolwiek sekretu lub niezgodny certyfikat kończy wysyłkę błędem. Oba warianty muszą przejść weryfikację przed opublikowaniem podpisanych artefaktów i plików SHA-256. Klucze zastępcze nie są generowane.
 
 ## Sprawdzenie na telefonie
+
+Dla Google Drive sprawdź: poprawną konfigurację klienta OAuth dla aktualnego certyfikatu, zgodę na zakresy `drive.file` i `email`, utworzenie folderu `SpeechRecorder`, wysłanie pliku WAV i fragmentu do `__sr_live`, weryfikację rozmiaru i MD5, oraz zachowanie lokalnego pliku bez sieci lub po cofnięciu zgody. Następnie sprawdź ponawianie synchronizacji i zmianę dostawcy.
+
+Dla OneDrive:
 
 1. Wybierz folder OneDrive i uruchom nasłuch.
 2. Nagraj mowę przez ponad 30 sekund i sprawdź pojawianie się technicznych plików `__sr_live_...partXXXX.wav` w podfolderze `__sr_live` na OneDrive.
@@ -151,3 +171,5 @@ Dokumentacja platformy:
 - Android foreground service notifications: https://developer.android.com/develop/ui/compose/notifications
 - Android 13 notification permission and foreground services: https://developer.android.com/develop/ui/compose/notifications/notification-permission
 - Android Storage Access Framework: https://developer.android.com/guide/topics/providers/document-provider
+- Google Play Services AuthorizationClient: https://developers.google.com/android/reference/com/google/android/gms/auth/api/identity/AuthorizationClient
+- Google Drive resumable upload: https://developers.google.com/workspace/drive/api/guides/manage-uploads
