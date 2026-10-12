@@ -54,7 +54,7 @@ object GoogleDriveBackup {
     }
 
     fun authorizationRequest(): AuthorizationRequest = AuthorizationRequest.builder()
-        .setRequestedScopes(listOf(Scope(Scopes.DRIVE_FILE)))
+        .setRequestedScopes(listOf(Scope(Scopes.DRIVE_FILE), Scope(Scopes.EMAIL)))
         .setPrompt(AuthorizationRequest.Prompt.SELECT_ACCOUNT)
         .build()
 
@@ -177,30 +177,41 @@ object GoogleDriveBackup {
         item(JSONObject(request(token, API + "/" + encode(id) +
             "?fields=" + encode("id,name,mimeType,size,md5Checksum"), "GET").body))
 
-    private fun folder(context: Context, token: String, parent: String, name: String, key: String): String {
-        synchronized(selectionLock) {
-            val prefs = preferences(context)
-            prefs.getString(key, null)?.let { cached ->
-                try {
-                    if (metadata(token, cached).mimeType == DRIVE_FOLDER_MIME) return cached
-                } catch (_: IOException) {
-                    prefs.edit().remove(key).apply()
+    private fun folder(
+        context: Context,
+        token: String,
+        parent: String,
+        name: String,
+        key: String,
+        email: String,
+    ): String {
+        val prefs = preferences(context)
+        prefs.getString(key, null)?.let { cached ->
+            try {
+                if (metadata(token, cached).mimeType == DRIVE_FOLDER_MIME) return cached
+            } catch (_: IOException) {
+                synchronized(selectionLock) {
+                    if (prefs.getString(key, null) == cached) prefs.edit().remove(key).apply()
                 }
             }
-            val existing = list(token, parent, name).firstOrNull { it.mimeType == DRIVE_FOLDER_MIME }
-            val id = existing?.id ?: JSONObject(request(token, API + "?fields=id", "POST", JSONObject()
-                .put("name", name)
-                .put("mimeType", DRIVE_FOLDER_MIME)
-                .put("parents", JSONArray().put(parent))
-            ).body).getString("id")
-            prefs.edit().putString(key, id).apply()
-            return id
         }
+        val existing = list(token, parent, name).firstOrNull { it.mimeType == DRIVE_FOLDER_MIME }
+        val id = existing?.id ?: JSONObject(request(token, API + "?fields=id", "POST", JSONObject()
+            .put("name", name)
+            .put("mimeType", DRIVE_FOLDER_MIME)
+            .put("parents", JSONArray().put(parent))
+        ).body).getString("id")
+        synchronized(selectionLock) {
+            if (isSelected(context) && account(context) == email) {
+                prefs.edit().putString(key, id).apply()
+            }
+        }
+        return id
     }
 
-    private fun destination(context: Context, token: String, live: Boolean): String {
-        val root = folder(context, token, "root", FOLDER_NAME, FOLDER_KEY)
-        return if (live) folder(context, token, root, LIVE_FOLDER_NAME, LIVE_FOLDER_KEY) else root
+    private fun destination(context: Context, token: String, live: Boolean, email: String): String {
+        val root = folder(context, token, "root", FOLDER_NAME, FOLDER_KEY, email)
+        return if (live) folder(context, token, root, LIVE_FOLDER_NAME, LIVE_FOLDER_KEY, email) else root
     }
 
     private fun fileMd5(file: File): String {
@@ -265,7 +276,7 @@ object GoogleDriveBackup {
         if (!isConfigured(context) || !file.isFile || file.length() <= 44L) return false
         return try {
             val access = token(context, email) ?: return false
-            val parent = destination(context, access, live)
+            val parent = destination(context, access, live, email)
             val size = file.length()
             val hash = fileMd5(file)
             val previous = list(access, parent, file.name).firstOrNull {
