@@ -162,15 +162,16 @@ class MainActivity : ComponentActivity() {
                 prefs().getString("capture_error", null),
                 prefs().getString("storage_error", null),
             ).joinToString("\n").ifBlank { null },
-            cloudReady = CloudFolderAccess.hasAccess(this),
+            cloudReady = GoogleDriveBackup.hasAccess(this),
+            cloudProvider = GoogleDriveBackup.selectedProvider(this),
         )
     }
 
     private fun requestAndStart() {
-        if (!CloudFolderAccess.hasAccess(this)) {
+        if (!GoogleDriveBackup.hasAccess(this)) {
             Toast.makeText(
                 this,
-                "Najpierw wybierz folder OneDrive w Ustawieniach.",
+                "Najpierw połącz Google Drive lub wybierz folder OneDrive w Ustawieniach.",
                 Toast.LENGTH_LONG,
             ).show()
             startActivity(Intent(this, SettingsActivity::class.java))
@@ -224,6 +225,7 @@ internal data class RecorderScreenState(
     val lastSpeech: String? = null,
     val error: String? = null,
     val cloudReady: Boolean = false,
+    val cloudProvider: String = "OneDrive",
 )
 
 @Composable
@@ -289,9 +291,9 @@ private fun RecorderScreen(
         item {
             MessageCard(
                 icon = if (state.cloudReady) Icons.Outlined.CloudDone else Icons.Outlined.CloudOff,
-                title = if (state.cloudReady) "OneDrive gotowy" else "Skonfiguruj OneDrive",
+                title = if (state.cloudReady) state.cloudProvider + " gotowy" else "Skonfiguruj zapis w chmurze",
                 body = if (state.cloudReady) {
-                    "Nagrania są zabezpieczane na bieżąco i finalizowane w wybranym folderze."
+                    "Nagrania są przesyłane do " + state.cloudProvider + " i potwierdzane przed usunięciem lokalnej kopii."
                 } else {
                     "Wybierz folder zapisu, zanim uruchomisz stały nasłuch."
                 },
