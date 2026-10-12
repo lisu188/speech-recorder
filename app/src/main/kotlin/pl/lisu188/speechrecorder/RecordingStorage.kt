@@ -13,6 +13,7 @@ import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -132,6 +133,11 @@ object RecordingStorage {
             val work = OneTimeWorkRequestBuilder<RecordingPublishWorker>()
                 .setInputData(Data.Builder().putString(INPUT_FILE, file.name).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                .apply {
+                    if (GoogleDriveBackup.isSelected(context)) setConstraints(
+                        Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
+                    )
+                }
                 .addTag("speech-recorder-onedrive")
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
@@ -140,7 +146,7 @@ object RecordingStorage {
                 work,
             )
         } catch (_: Exception) {
-            reportError(context, "Nagranie zachowano lokalnie. Otwórz aplikację, aby ponowić zapis do OneDrive.")
+            reportError(context, "Nagranie zachowano lokalnie. Otwórz aplikację, aby ponowić zapis w chmurze.")
         }
     }
 
@@ -172,6 +178,11 @@ object RecordingStorage {
             val work = OneTimeWorkRequestBuilder<LivePartPublishWorker>()
                 .setInputData(Data.Builder().putString(INPUT_FILE, file.name).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+                .apply {
+                    if (GoogleDriveBackup.isSelected(context)) setConstraints(
+                        Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
+                    )
+                }
                 .addTag("speech-recorder-live-onedrive")
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
@@ -180,12 +191,12 @@ object RecordingStorage {
                 work,
             )
         } catch (_: Exception) {
-            reportError(context, "Fragment nagrania czeka lokalnie na zapis do OneDrive.")
+            reportError(context, "Fragment nagrania czeka lokalnie na zapis w chmurze.")
         }
     }
 
     fun scheduleArchiveMaintenance(context: Context) {
-        if (!CloudFolderAccess.hasAccess(context)) return
+        if (GoogleDriveBackup.isSelected(context) || !CloudFolderAccess.hasAccess(context)) return
         try {
             val periodic = PeriodicWorkRequestBuilder<ArchiveMaintenanceWorker>(24, TimeUnit.HOURS)
                 .setConstraints(archiveConstraints())
@@ -203,7 +214,7 @@ object RecordingStorage {
     }
 
     fun enqueueArchiveNow(context: Context) {
-        if (!CloudFolderAccess.hasAccess(context)) return
+        if (GoogleDriveBackup.isSelected(context) || !CloudFolderAccess.hasAccess(context)) return
         try {
             val work = OneTimeWorkRequestBuilder<ArchiveMaintenanceWorker>()
                 .setConstraints(archiveConstraints())
@@ -230,15 +241,15 @@ object RecordingStorage {
                         .sortedBy { it.name }
                     val pending = directory(app).listFiles().orEmpty()
                         .filter { it.isFile && it.name.endsWith(".wav", ignoreCase = true) }
-                    if ((pending.isNotEmpty() || liveParts.isNotEmpty()) && !CloudFolderAccess.hasAccess(app)) {
-                        reportError(app, "Nagrania czekają lokalnie. Wybierz folder OneDrive w Ustawieniach.")
+                    if ((pending.isNotEmpty() || liveParts.isNotEmpty()) && !GoogleDriveBackup.hasAccess(app)) {
+                        reportError(app, "Nagrania czekają lokalnie. Skonfiguruj zapis w chmurze w Ustawieniach.")
                         return@synchronized
                     }
                     liveParts.forEach { scheduleLivePartWorker(app, it) }
                     pending.forEach { enqueue(app, it) }
                     scheduleArchiveMaintenance(app)
                 } catch (_: Exception) {
-                    reportError(app, "Nie udało się wznowić zapisu nagrań. Sprawdź pamięć telefonu i dostęp do OneDrive.")
+                    reportError(app, "Nie udało się wznowić zapisu nagrań. Sprawdź pamięć telefonu i dostęp do chmury.")
                 }
             }
         }
@@ -247,7 +258,7 @@ object RecordingStorage {
     fun migrateMediaStore(context: Context) {
         val app = context.applicationContext
         migrationExecutor.execute {
-            if (!CloudFolderAccess.hasAccess(app)) return@execute
+            if (GoogleDriveBackup.isSelected(app) || !CloudFolderAccess.hasAccess(app)) return@execute
             val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
             val projection = arrayOf(
                 MediaStore.Audio.Media._ID,
@@ -373,6 +384,17 @@ object RecordingStorage {
             try {
                 withClosedRecording(wavFile) { bytes ->
                     if (bytes == 0L) return@withClosedRecording wavFile.delete()
+                    if (GoogleDriveBackup.isSelected(context)) {
+                        if (!GoogleDriveBackup.publish(context, wavFile, false)) return@withClosedRecording false
+                        GoogleDriveBackup.cleanLiveParts(context, wavFile.name)
+                        liveDirectory(context).listFiles().orEmpty()
+                            .filter { it.name.startsWith(livePrefix(wavFile.name)) }
+                            .forEach { it.delete() }
+                        if (!wavFile.delete()) throw IOException("Unable to remove verified Google Drive staging file")
+                        clearStorageErrorIfEmpty(context)
+                        libraryChanged(context)
+                        return@withClosedRecording true
+                    }
                     val tree = CloudFolderAccess.load(context) ?: return@withClosedRecording false
                     val expectedSize = wavFile.length()
                     if (!hasVerifiedCommit(context, tree, wavFile.name, expectedSize)) {
@@ -401,7 +423,7 @@ object RecordingStorage {
                     true
                 }
             } catch (_: Exception) {
-                reportError(context, "Nagranie zachowano lokalnie. Zapis do OneDrive zostanie ponowiony.")
+                reportError(context, "Nagranie zachowano lokalnie. Zapis do " + GoogleDriveBackup.selectedProvider(context) + " zostanie ponowiony.")
                 false
             }
         }
@@ -413,6 +435,10 @@ object RecordingStorage {
             try {
                 withClosedRecording(file) { bytes ->
                     if (bytes == 0L) return@withClosedRecording file.delete()
+                    if (GoogleDriveBackup.isSelected(context)) {
+                        if (!GoogleDriveBackup.publish(context, file, true)) return@withClosedRecording false
+                        return@withClosedRecording file.delete()
+                    }
                     val tree = CloudFolderAccess.load(context) ?: return@withClosedRecording false
                     val committed = hasVerifiedCommit(context, tree, finalName)
                     if (committed) {
