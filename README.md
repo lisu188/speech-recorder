@@ -1,5 +1,9 @@
 # Speech Recorder
 
+Masowa lokalna transkrypcja nagrań z Google Drive jest dostępna jako osobny
+skrypt Python: [konfiguracja i wznowienie](docs/transkrypcja-drive.md).
+Nie zmienia logiki nagrywania aplikacji Android.
+
 Dyktafon Android zapisujący WAV tylko wtedy, gdy wykryje mowę. Nagrywanie i VAD działają lokalnie jako foreground service. Zakończone klipy można zapisywać w Google Drive przez Drive API lub w wybranym folderze OneDrive przez systemowy Storage Access Framework.
 
 ## Wersja 1.8.0
