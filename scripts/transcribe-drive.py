@@ -42,6 +42,15 @@ EMPTY_RE = re.compile(
     r"|brak\s+transkrypcji|transkrypcja\s+(?:jest\s+)?pusta|unable\s+to\s+transcribe|speech\s+(?:not|could\s+not\s+be)\s+(?:detected|recognized))",
     re.IGNORECASE,
 )
+# Expanded legacy absence phrases are status metadata; actual speech can begin
+# with the same words, so do not apply those alternatives to body lines.
+EMPTY_STATUS_RE = re.compile(
+    EMPTY_RE.pattern
+    + r"|(?:brak|nie\s+(?:wykryto|rozpoznano))\s+(?:czytelnej|zrozumiałej|wyraźnej|wyraznej)\s+mowy"
+    + r"|brak\s+(?:(?:czytelnych|rozpoznanych|zrozumiałych|wyraźnych|wyraznych)\s+)?wypowiedzi"
+    + r"|brak\s+(?:czytelnej|zrozumiałej)\s+transkrypcji",
+    re.IGNORECASE,
+)
 HEADER_RE = re.compile(r"^(?:nagranie|recording|język|jezyk|language|czas trwania|duration|model|status|źródło|zrodlo|source|generated|utworzono|transkrypcja|transcription)\s*:", re.IGNORECASE)
 STOP = threading.Event()
 
@@ -137,16 +146,20 @@ def classify_transcript(text: str) -> str:
     text = text.lstrip("\ufeff").strip()
     if not text:
         return "empty"
-    if re.search(r"^status\s*:\s*(?:error|failed|partial|pending|processing|błąd|niekompletna)", text, re.I | re.M):
+    if re.search(r"^status\s*:\s*(?:error|failed|partial|pending|processing|błąd|niekompletna|częściow[ao]|czesciow[ao])", text, re.I | re.M):
         return "uncertain"
     body = [line.strip() for line in text.splitlines() if line.strip() and not HEADER_RE.match(line.strip())]
     if not body:
         return "empty"
+    # An absence marker in a header does not suppress real timestamped speech.
     speech = [match.group(3) for line in body if (match := STAMP_RE.search(line))]
     if speech:
         return "complete"
+    # Legacy exports may put the no-speech result in Status and follow it with
+    # explanatory prose. That prose is not recognized speech.
+    if any(EMPTY_STATUS_RE.match(match.group(1)) for match in re.finditer(r"^status\s*:\s*(.+)$", text, re.I | re.M)):
+        return "empty"
     useful = speech or body
-    # An absence marker in a header does not suppress real timestamped speech.
     useful = [line for line in useful if not EMPTY_RE.match(line) and not re.fullmatch(r"[\W_]+", line)]
     if not useful:
         return "empty"
@@ -161,6 +174,7 @@ def matching_transcripts(recording: dict[str, Any], files: list[dict[str, Any]])
     names = {stem, stem + ".wav", stem + ".txt", stem + ".transkrypcja", stem + ".transkrypcja.txt",
              stem + ".transcription", stem + ".transcription.txt", stem + " transkrypcja",
              stem + " transcription", stem + ".transcript", stem + ".transcript.txt",
+             stem + ".wav.transkrypcja", stem + ".wav.transcription",
              stem + ".wav.transkrypcja.txt", stem + ".wav.txt"}
     matches = []
     for file in files:
@@ -909,7 +923,7 @@ class LocalTranscriber:
         fingerprint = source_fingerprint(recording)
         record = checkpoint.get(recording["id"]) or {}
         settings = {"model": self.args.model, "language": self.args.language, "chunk_seconds": self.args.chunk_seconds,
-                    "engine_version": 2, "vad": "silero-500-250", "overlap_seconds": 2}
+                    "engine_version": 3, "vad": "silero-500-250", "overlap_seconds": 2}
         settings_hash = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
         if record.get("fingerprint") != fingerprint or record.get("settings_hash") != settings_hash:
             record = {"fingerprint": fingerprint, "settings_hash": settings_hash, "settings": settings,
@@ -954,7 +968,10 @@ class LocalTranscriber:
                     words = getattr(segment, "words", None) or []
                     probabilities = [word.probability for word in words if getattr(word, "probability", None) is not None]
                     low_words = probabilities and sum(probabilities) / len(probabilities) < 0.35
-                    if not text or segment.no_speech_prob >= 0.6 or segment.avg_logprob < -1.0 or segment.compression_ratio > 2.4 or low_words:
+                    # faster-whisper already combines no_speech_threshold with
+                    # log_prob_threshold. High no-speech probability alone must
+                    # not discard speech the decoder recognized confidently.
+                    if not text or segment.avg_logprob < -1.0 or segment.compression_ratio > 2.4 or low_words:
                         chunk_rejected += bool(text)
                         continue
                     start, end = offset + segment.start, min(duration, offset + segment.end)
