@@ -38,8 +38,9 @@ STAMP_RE = re.compile(r"\[(\d{2,}:\d{2}:\d{2}(?:[.,]\d{1,3})?)\s*(?:-->|[-–])\
 EMPTY_RE = re.compile(
     r"(?:no\s+(?:recogniz(?:ed|able)|detect(?:ed|able))?\s*speech(?:\s+(?:was\s+)?(?:detected|recognized|found))?"
     r"|no\s+(?:audio|transcript(?:ion)?|words)\s+(?:detected|available|found)"
-    r"|(?:brak|nie\s+(?:wykryto|rozpoznano))\s+(?:(?:wykrytej|rozpoznanej|żadnej|zadnej)\s+)?mowy"
-    r"|brak\s+transkrypcji|transkrypcja\s+(?:jest\s+)?pusta|unable\s+to\s+transcribe|speech\s+(?:not|could\s+not\s+be)\s+(?:detected|recognized))",
+    r"|(?:brak|nie\s+(?:wykryto|rozpoznano))\s+(?:(?:wykrytej|rozpoznanej|żadnej|zadnej|czytelnej|zrozumiałej|wyraźnej|wyraznej)\s+)?mowy"
+    r"|brak\s+(?:(?:czytelnych|rozpoznanych|zrozumiałych|wyraźnych|wyraznych)\s+)?wypowiedzi"
+    r"|brak\s+(?:(?:czytelnej|zrozumiałej)\s+)?transkrypcji|transkrypcja\s+(?:jest\s+)?pusta|unable\s+to\s+transcribe|speech\s+(?:not|could\s+not\s+be)\s+(?:detected|recognized))",
     re.IGNORECASE,
 )
 HEADER_RE = re.compile(r"^(?:nagranie|recording|język|jezyk|language|czas trwania|duration|model|status|źródło|zrodlo|source|generated|utworzono|transkrypcja|transcription)\s*:", re.IGNORECASE)
@@ -137,16 +138,20 @@ def classify_transcript(text: str) -> str:
     text = text.lstrip("\ufeff").strip()
     if not text:
         return "empty"
-    if re.search(r"^status\s*:\s*(?:error|failed|partial|pending|processing|błąd|niekompletna)", text, re.I | re.M):
+    if re.search(r"^status\s*:\s*(?:error|failed|partial|pending|processing|błąd|niekompletna|częściow[ao]|czesciow[ao])", text, re.I | re.M):
         return "uncertain"
     body = [line.strip() for line in text.splitlines() if line.strip() and not HEADER_RE.match(line.strip())]
     if not body:
         return "empty"
+    # An absence marker in a header does not suppress real timestamped speech.
     speech = [match.group(3) for line in body if (match := STAMP_RE.search(line))]
     if speech:
         return "complete"
+    # Legacy exports may put the no-speech result in Status and follow it with
+    # explanatory prose. That prose is not recognized speech.
+    if any(EMPTY_RE.match(match.group(1)) for match in re.finditer(r"^status\s*:\s*(.+)$", text, re.I | re.M)):
+        return "empty"
     useful = speech or body
-    # An absence marker in a header does not suppress real timestamped speech.
     useful = [line for line in useful if not EMPTY_RE.match(line) and not re.fullmatch(r"[\W_]+", line)]
     if not useful:
         return "empty"
@@ -161,6 +166,7 @@ def matching_transcripts(recording: dict[str, Any], files: list[dict[str, Any]])
     names = {stem, stem + ".wav", stem + ".txt", stem + ".transkrypcja", stem + ".transkrypcja.txt",
              stem + ".transcription", stem + ".transcription.txt", stem + " transkrypcja",
              stem + " transcription", stem + ".transcript", stem + ".transcript.txt",
+             stem + ".wav.transkrypcja", stem + ".wav.transcription",
              stem + ".wav.transkrypcja.txt", stem + ".wav.txt"}
     matches = []
     for file in files:

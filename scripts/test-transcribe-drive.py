@@ -95,12 +95,27 @@ class TranscriptClassificationTests(unittest.TestCase):
         self.assertEqual(cli.classify_transcript(COMPLETE), "complete")
 
     def test_error_and_partial_markers_are_not_complete(self):
-        for text in ("Error: transcription failed", "Status: partial\n" + COMPLETE, "Status: error\n" + COMPLETE):
+        for text in ("Error: transcription failed", "Status: partial\n" + COMPLETE, "Status: error\n" + COMPLETE,
+                     "Status: Częściowo rozpoznana mowa\n" + COMPLETE):
             with self.subTest(text=text):
                 self.assertEqual(cli.classify_transcript(text), "uncertain")
 
     def test_empty_phrase_inside_actual_speech_does_not_erase_speech(self):
         self.assertEqual(cli.classify_transcript("[00:00:00.000 --> 00:00:03.000] Powiedziałem: brak rozpoznanej mowy.\n"), "complete")
+
+    def test_legacy_no_speech_status_does_not_count_explanatory_prose_as_speech(self):
+        for status in ("Nie rozpoznano czytelnej mowy w tym nagraniu", "Brak czytelnej transkrypcji z narzędzia",
+                       "Brak rozpoznanych wypowiedzi"):
+            with self.subTest(status=status):
+                text = ("Transkrypcja z narzędzia\nNagranie: speech_test.wav\n"
+                        "Status: " + status + "\n\n"
+                        "Wynik wymaga ponownego przetworzenia w innym narzędziu.\n"
+                        "Ten dokument zawiera informację o wyniku rozpoznawania.\n")
+                self.assertEqual(cli.classify_transcript(text), "empty")
+
+    def test_timestamped_speech_overrides_an_old_no_speech_status(self):
+        text = "Status: Nie rozpoznano czytelnej mowy\n" + COMPLETE
+        self.assertEqual(cli.classify_transcript(text), "complete")
 
 
 class SourceMatchingTests(unittest.TestCase):
@@ -119,6 +134,31 @@ class SourceMatchingTests(unittest.TestCase):
     def test_transcript_in_another_parent_is_not_a_match(self):
         wrong_folder = file_meta("txt-1", NAME + ".transkrypcja.txt", parent="folder-2")
         self.assertEqual(cli.matching_transcripts(SOURCE, [wrong_folder]), [])
+
+    def test_legacy_google_docs_keep_wav_extension_before_transcription_suffix(self):
+        for suffix in (".transkrypcja", ".transcription"):
+            with self.subTest(suffix=suffix):
+                transcript = file_meta("doc-1", SOURCE["name"] + suffix, mimeType=cli.DOC_MIME)
+                selected = cli.select_existing(SOURCE, [transcript], {"doc-1": COMPLETE})
+                self.assertEqual(selected["action"], "skip")
+                self.assertEqual(selected["reason"], "complete")
+
+    def test_legacy_wav_transcription_names_do_not_match_other_sources(self):
+        for suffix in (".transkrypcja", ".transcription"):
+            with self.subTest(suffix=suffix):
+                unrelated = file_meta("doc-1", NAME + "_extra.wav" + suffix, mimeType=cli.DOC_MIME)
+                wrong_folder = file_meta("doc-2", SOURCE["name"] + suffix, parent="folder-2", mimeType=cli.DOC_MIME)
+                wrong_source_id = file_meta("doc-3", SOURCE["name"] + suffix, mimeType=cli.DOC_MIME,
+                                            appProperties={"srSourceId": "wav-other"})
+                self.assertEqual(cli.matching_transcripts(SOURCE, [unrelated, wrong_folder, wrong_source_id]), [])
+
+    def test_empty_legacy_wav_transcription_document_is_retryable(self):
+        transcript = file_meta("doc-1", SOURCE["name"] + ".transkrypcja", mimeType=cli.DOC_MIME)
+        content = {"doc-1": "Brak rozpoznanej mowy"}
+        self.assertEqual(cli.select_existing(SOURCE, [transcript], content)["reason"], "retry_empty_required")
+        selected = cli.select_existing(SOURCE, [transcript], content, retry_empty=True)
+        self.assertEqual(selected["action"], "process")
+        self.assertEqual(selected["empty"], [transcript])
 
     def test_source_id_matches_a_renamed_document_in_same_folder(self):
         renamed = file_meta("txt-1", "Previous Descript document", appProperties={"srSourceId": SOURCE["id"]})
