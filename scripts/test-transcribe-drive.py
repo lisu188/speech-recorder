@@ -119,6 +119,13 @@ class TranscriptClassificationTests(unittest.TestCase):
         text = "Status: Nie rozpoznano czytelnej mowy\n" + COMPLETE
         self.assertEqual(cli.classify_transcript(text), "complete")
 
+    def test_expanded_absence_phrases_do_not_erase_untimestamped_speech(self):
+        for text in ("Brak rozpoznanych wypowiedzi świadka w protokole.",
+                     "Brak czytelnej transkrypcji utrudnił nam analizę.",
+                     "Nie rozpoznano czytelnej mowy na podstawie tego fragmentu."):
+            with self.subTest(text=text):
+                self.assertEqual(cli.classify_transcript(text), "complete")
+
     def test_legacy_speech_status_preserves_untimestamped_transcript(self):
         text = ("Nagranie: speech_test.wav\nStatus: Rozpoznana mowa, transkrypcja poniżej\n\n"
                 "To jest przykładowa pełna wypowiedź z nagrania.\n")

@@ -38,9 +38,17 @@ STAMP_RE = re.compile(r"\[(\d{2,}:\d{2}:\d{2}(?:[.,]\d{1,3})?)\s*(?:-->|[-–])\
 EMPTY_RE = re.compile(
     r"(?:no\s+(?:recogniz(?:ed|able)|detect(?:ed|able))?\s*speech(?:\s+(?:was\s+)?(?:detected|recognized|found))?"
     r"|no\s+(?:audio|transcript(?:ion)?|words)\s+(?:detected|available|found)"
-    r"|(?:brak|nie\s+(?:wykryto|rozpoznano))\s+(?:(?:wykrytej|rozpoznanej|żadnej|zadnej|czytelnej|zrozumiałej|wyraźnej|wyraznej)\s+)?mowy"
-    r"|brak\s+(?:(?:czytelnych|rozpoznanych|zrozumiałych|wyraźnych|wyraznych)\s+)?wypowiedzi"
-    r"|brak\s+(?:(?:czytelnej|zrozumiałej)\s+)?transkrypcji|transkrypcja\s+(?:jest\s+)?pusta|unable\s+to\s+transcribe|speech\s+(?:not|could\s+not\s+be)\s+(?:detected|recognized))",
+    r"|(?:brak|nie\s+(?:wykryto|rozpoznano))\s+(?:(?:wykrytej|rozpoznanej|żadnej|zadnej)\s+)?mowy"
+    r"|brak\s+transkrypcji|transkrypcja\s+(?:jest\s+)?pusta|unable\s+to\s+transcribe|speech\s+(?:not|could\s+not\s+be)\s+(?:detected|recognized))",
+    re.IGNORECASE,
+)
+# Expanded legacy absence phrases are status metadata; actual speech can begin
+# with the same words, so do not apply those alternatives to body lines.
+EMPTY_STATUS_RE = re.compile(
+    EMPTY_RE.pattern
+    + r"|(?:brak|nie\s+(?:wykryto|rozpoznano))\s+(?:czytelnej|zrozumiałej|wyraźnej|wyraznej)\s+mowy"
+    + r"|brak\s+(?:(?:czytelnych|rozpoznanych|zrozumiałych|wyraźnych|wyraznych)\s+)?wypowiedzi"
+    + r"|brak\s+(?:czytelnej|zrozumiałej)\s+transkrypcji",
     re.IGNORECASE,
 )
 HEADER_RE = re.compile(r"^(?:nagranie|recording|język|jezyk|language|czas trwania|duration|model|status|źródło|zrodlo|source|generated|utworzono|transkrypcja|transcription)\s*:", re.IGNORECASE)
@@ -149,7 +157,7 @@ def classify_transcript(text: str) -> str:
         return "complete"
     # Legacy exports may put the no-speech result in Status and follow it with
     # explanatory prose. That prose is not recognized speech.
-    if any(EMPTY_RE.match(match.group(1)) for match in re.finditer(r"^status\s*:\s*(.+)$", text, re.I | re.M)):
+    if any(EMPTY_STATUS_RE.match(match.group(1)) for match in re.finditer(r"^status\s*:\s*(.+)$", text, re.I | re.M)):
         return "empty"
     useful = speech or body
     useful = [line for line in useful if not EMPTY_RE.match(line) and not re.fullmatch(r"[\W_]+", line)]
