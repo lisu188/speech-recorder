@@ -96,7 +96,8 @@ class TranscriptClassificationTests(unittest.TestCase):
 
     def test_error_and_partial_markers_are_not_complete(self):
         for text in ("Error: transcription failed", "Status: partial\n" + COMPLETE, "Status: error\n" + COMPLETE,
-                     "Status: Częściowo rozpoznana mowa\n" + COMPLETE):
+                     "Status: Częściowo rozpoznana mowa\n" + COMPLETE,
+                     "Status: Częściowo rozpoznana mowa\nPrzykładowa urwana wypowiedź."):
             with self.subTest(text=text):
                 self.assertEqual(cli.classify_transcript(text), "uncertain")
 
@@ -115,6 +116,11 @@ class TranscriptClassificationTests(unittest.TestCase):
 
     def test_timestamped_speech_overrides_an_old_no_speech_status(self):
         text = "Status: Nie rozpoznano czytelnej mowy\n" + COMPLETE
+        self.assertEqual(cli.classify_transcript(text), "complete")
+
+    def test_legacy_speech_status_preserves_untimestamped_transcript(self):
+        text = ("Nagranie: speech_test.wav\nStatus: Rozpoznana mowa, transkrypcja poniżej\n\n"
+                "To jest przykładowa pełna wypowiedź z nagrania.\n")
         self.assertEqual(cli.classify_transcript(text), "complete")
 
 
