@@ -6,6 +6,7 @@ All Drive requests and model inference are fake; fixtures stay in temporary dirs
 """
 
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -716,6 +717,8 @@ class LocalModelTests(unittest.TestCase):
         self.assertEqual(result["languages"], ["en", "pl"])
         self.assertIsNone(self.transcriber.model.transcribe.call_args.kwargs["language"])
         self.assertTrue(self.transcriber.model.transcribe.call_args.kwargs["vad_filter"])
+        self.assertEqual(self.transcriber.model.transcribe.call_args.kwargs["no_speech_threshold"], 0.6)
+        self.assertEqual(self.transcriber.model.transcribe.call_args.kwargs["log_prob_threshold"], -1.0)
         self.assertFalse(self.transcriber.model.transcribe.call_args.kwargs["condition_on_previous_text"])
 
     def test_resume_does_not_repeat_completed_model_chunks(self):
@@ -747,12 +750,57 @@ class LocalModelTests(unittest.TestCase):
 
     def test_no_speech_or_unreliable_segments_are_reported_empty(self):
         self.chunks = self.chunks[:1]
-        segments = [model_segment(no_speech_prob=0.9), model_segment(avg_logprob=-2.0), model_segment(compression_ratio=4.0), model_segment(words=[SimpleNamespace(probability=0.1)])]
+        segments = [model_segment(no_speech_prob=0.9, avg_logprob=-2.0), model_segment(avg_logprob=-2.0), model_segment(compression_ratio=4.0), model_segment(words=[SimpleNamespace(probability=0.1)])]
         self.transcriber.model.transcribe.return_value = (segments, SimpleNamespace(language="pl"))
         result = self.transcribe()
         self.assertEqual(result["status"], "empty")
         self.assertEqual(result["segments"], [])
         self.assertEqual(result["rejected_segments"], 4)
+
+    def test_high_no_speech_probability_keeps_confident_decoded_speech(self):
+        self.chunks = self.chunks[:1]
+        segment = model_segment(no_speech_prob=0.98, avg_logprob=-0.2, compression_ratio=1.7,
+                                words=[SimpleNamespace(probability=0.8)])
+        self.transcriber.model.transcribe.return_value = ([segment], SimpleNamespace(language="en"))
+        result = self.transcribe()
+        self.assertEqual(result["status"], "success")
+        self.assertEqual([item["text"] for item in result["segments"]], [segment.text])
+        self.assertEqual(result["rejected_segments"], 0)
+
+    def test_high_no_speech_probability_with_low_confidence_remains_rejected(self):
+        self.chunks = self.chunks[:1]
+        segment = model_segment(no_speech_prob=0.98, avg_logprob=-1.2,
+                                words=[SimpleNamespace(probability=0.8)])
+        self.transcriber.model.transcribe.return_value = ([segment], SimpleNamespace(language="en"))
+        result = self.transcribe()
+        self.assertEqual(result["status"], "empty")
+        self.assertEqual(result["segments"], [])
+        self.assertEqual(result["rejected_segments"], 1)
+
+    def test_model_no_speech_result_remains_empty(self):
+        self.chunks = self.chunks[:1]
+        self.transcriber.model.transcribe.return_value = ([], SimpleNamespace(language="pl"))
+        result = self.transcribe()
+        self.assertEqual(result["status"], "empty")
+        self.assertEqual(result["segments"], [])
+        self.assertEqual(result["rejected_segments"], 0)
+
+    def test_old_filter_checkpoint_with_partial_speech_is_reprocessed(self):
+        self.chunks = self.chunks[:1]
+        old_settings = {"model": "large-v3", "language": None, "chunk_seconds": 30,
+                        "engine_version": 2, "vad": "silero-500-250", "overlap_seconds": 2}
+        self.checkpoint.set(SOURCE["id"], {
+            "fingerprint": cli.source_fingerprint(SOURCE), "settings": old_settings,
+            "settings_hash": hashlib.sha256(json.dumps(old_settings, sort_keys=True).encode()).hexdigest(),
+            "chunks": {"0": {"duration": 30.0, "segments": [{"start": 0.2, "end": 0.8, "text": "Previously kept speech."}],
+                               "language": "en", "rejected": 1}},
+        })
+        restored = model_segment(text="Confident speech previously discarded.", no_speech_prob=0.98)
+        self.transcriber.model.transcribe.return_value = ([restored], SimpleNamespace(language="en"))
+        result = self.transcribe()
+        self.transcriber.model.transcribe.assert_called_once()
+        self.assertEqual([item["text"] for item in result["segments"]], [restored.text])
+        self.assertEqual(self.checkpoint.get(SOURCE["id"])["settings"]["engine_version"], 3)
 
     def test_retry_empty_repeats_only_empty_chunks_while_resuming_speech(self):
         self.transcriber.model.transcribe.side_effect = [([], SimpleNamespace(language="pl")), ([model_segment()], SimpleNamespace(language="en"))]

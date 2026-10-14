@@ -915,7 +915,7 @@ class LocalTranscriber:
         fingerprint = source_fingerprint(recording)
         record = checkpoint.get(recording["id"]) or {}
         settings = {"model": self.args.model, "language": self.args.language, "chunk_seconds": self.args.chunk_seconds,
-                    "engine_version": 2, "vad": "silero-500-250", "overlap_seconds": 2}
+                    "engine_version": 3, "vad": "silero-500-250", "overlap_seconds": 2}
         settings_hash = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
         if record.get("fingerprint") != fingerprint or record.get("settings_hash") != settings_hash:
             record = {"fingerprint": fingerprint, "settings_hash": settings_hash, "settings": settings,
@@ -960,7 +960,10 @@ class LocalTranscriber:
                     words = getattr(segment, "words", None) or []
                     probabilities = [word.probability for word in words if getattr(word, "probability", None) is not None]
                     low_words = probabilities and sum(probabilities) / len(probabilities) < 0.35
-                    if not text or segment.no_speech_prob >= 0.6 or segment.avg_logprob < -1.0 or segment.compression_ratio > 2.4 or low_words:
+                    # faster-whisper already combines no_speech_threshold with
+                    # log_prob_threshold. High no-speech probability alone must
+                    # not discard speech the decoder recognized confidently.
+                    if not text or segment.avg_logprob < -1.0 or segment.compression_ratio > 2.4 or low_words:
                         chunk_rejected += bool(text)
                         continue
                     start, end = offset + segment.start, min(duration, offset + segment.end)
