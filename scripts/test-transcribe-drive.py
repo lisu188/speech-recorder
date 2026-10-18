@@ -40,6 +40,20 @@ def file_meta(file_id, name, parent="folder-1", **extra):
     return result
 
 
+def v2_file_meta(file, **extra):
+    result = {
+        "id": file["id"], "title": file["name"], "mimeType": file["mimeType"],
+        "parents": [{"id": parent} for parent in file.get("parents", [])],
+        "fileSize": file.get("size", ""), "md5Checksum": file.get("md5Checksum", ""),
+        "modifiedDate": file.get("modifiedTime", ""), "labels": {"trashed": file.get("trashed", False)},
+        "etag": '"v2-version-1"',
+        "properties": [{"key": key, "value": value, "visibility": "PRIVATE"}
+                       for key, value in (file.get("appProperties") or {}).items()],
+    }
+    result.update(extra)
+    return result
+
+
 class NameMatchingTests(unittest.TestCase):
     def test_full_recordings_include_android_uuid_names(self):
         for name in (NAME + ".wav", NAME + "_e20a2da7-91ca-4f90-8888-d8dbe6156c48.wav"):
@@ -395,6 +409,123 @@ class DriveApiTests(unittest.TestCase):
         self.session.request.return_value = Response(payload=dict(SOURCE), headers={"ETag": '"revision-1"'})
         self.assertEqual(self.drive.get_file(SOURCE["id"])["_etag"], '"revision-1"')
 
+    def text_update_target(self):
+        return file_meta("txt-1", NAME + ".transkrypcja.txt", mimeType="text/plain", size="5",
+                         md5Checksum=hashlib.md5(b"empty").hexdigest(), modifiedTime="2026-10-12T18:32:30Z",
+                         appProperties={"srSourceId": SOURCE["id"], "unrelated": "keep private"})
+
+    def test_v2_text_state_binds_metadata_content_and_all_properties_to_strong_validator(self):
+        target = self.text_update_target()
+        meta = v2_file_meta(target, modifiedDate="2026-10-12T18:32:30.000Z")
+        meta["properties"].append({"key": "unrelated", "value": "keep public", "visibility": "PUBLIC",
+                                   "etag": '"property-etag"', "selfLink": "ignored", "kind": "drive#property"})
+        self.session.request.side_effect = [Response(payload=meta, headers={"ETag": meta["etag"]}), Response(content=b"empty"),
+                                            Response(payload=meta, headers={"ETag": meta["etag"]})]
+        state = self.drive.get_text_update_state(target, "empty")
+        calls = self.session.request.call_args_list
+        self.assertEqual(calls[0].args, ("GET", cli.DRIVE_V2_API + "/txt-1"))
+        self.assertEqual(calls[0].kwargs["params"]["fields"], cli.TEXT_UPDATE_FIELDS)
+        self.assertIn("properties(key,value,visibility)", cli.TEXT_UPDATE_FIELDS)
+        self.assertEqual(calls[1].args, ("GET", cli.DRIVE_V2_API + "/txt-1"))
+        self.assertEqual(calls[1].kwargs["params"]["alt"], "media")
+        self.assertNotIn("headers", calls[1].kwargs)
+        self.assertEqual(calls[2].args, calls[0].args)
+        self.assertEqual(calls[2].kwargs, calls[0].kwargs)
+        self.assertEqual(state["etag"], '"v2-version-1"')
+        self.assertEqual(state["properties"][-1], {"key": "unrelated", "value": "keep public", "visibility": "PUBLIC"})
+
+    def test_reordered_snapshot_properties_and_parents_allow_conditional_replacement(self):
+        target = dict(self.text_update_target(), parents=["folder-1", "folder-2"])
+        before = v2_file_meta(target)
+        before["properties"].append({"key": "unrelated", "value": "keep public", "visibility": "PUBLIC"})
+        after = dict(before, properties=list(reversed(before["properties"])), parents=list(reversed(before["parents"])))
+        self.session.request.side_effect = [Response(payload=before, headers={"ETag": before["etag"]}),
+                                            Response(content=b"empty"), Response(payload=after, headers={"ETag": after["etag"]}), Response()]
+        self.drive.get_file = Mock(side_effect=lambda file_id: dict(SOURCE) if file_id == SOURCE["id"] else dict(target))
+        self.drive.contents = Mock(return_value=[dict(target)])
+        self.drive.read_text = Mock(return_value="empty")
+        self.drive.archive_existing = Mock()
+        self.drive.verify_uploaded = Mock(return_value=dict(target))
+        with tempfile.TemporaryDirectory() as work:
+            result = self.drive.publish_text(SOURCE, COMPLETE, [], cli.CheckpointStore(Path(work)))
+        self.assertEqual(result, target)
+        self.assertEqual(self.session.request.call_count, 4)
+        self.assertEqual(self.session.request.call_args.args, ("PUT", cli.UPLOAD_V2_API + "/txt-1"))
+        self.assertEqual(self.session.request.call_args.kwargs["headers"]["If-Match"], before["etag"])
+        self.drive.verify_uploaded.assert_called_once_with("txt-1", COMPLETE, SOURCE)
+
+    def test_absent_or_null_v3_private_properties_match_empty_v2_properties(self):
+        for include_field, private in ((True, {}), (True, None), (False, None)):
+            with self.subTest(include_field=include_field, private=private):
+                target = dict(self.text_update_target(), appProperties=private)
+                if not include_field:
+                    target.pop("appProperties")
+                meta = v2_file_meta(target)
+                self.session.request.side_effect = [Response(payload=meta, headers={"ETag": meta["etag"]}), Response(content=b"empty"),
+                                                    Response(payload=meta, headers={"ETag": meta["etag"]})]
+                self.assertEqual(self.drive.get_text_update_state(target, "empty")["properties"], [])
+
+    def test_missing_weak_or_disagreeing_v2_validators_preserve_target(self):
+        target = self.text_update_target()
+        for header, body in ((None, '"v2-version-1"'), ('W/"v2-version-1"', 'W/"v2-version-1"'),
+                             ('"v2-version-1"', None), ('"v2-version-1"', '"different"'),
+                             ("*", "*"), ('"two", "validators"', '"two", "validators"')):
+            with self.subTest(header=header, body=body):
+                self.session.request.reset_mock()
+                self.session.request.return_value = Response(payload=v2_file_meta(target, etag=body), headers={"ETag": header})
+                with self.assertRaises(cli.TranscriptionError):
+                    self.drive.get_text_update_state(target, "empty")
+                self.session.request.assert_called_once()
+
+    def test_cross_version_metadata_or_provenance_changes_block_before_media_or_write(self):
+        target = self.text_update_target()
+        changes = [{"id": "other"}, {"title": "renamed.txt"}, {"mimeType": cli.DOC_MIME},
+                   {"parents": [{"id": "other-folder"}]}, {"fileSize": "6"}, {"md5Checksum": "new-md5"},
+                   {"modifiedDate": "2026-10-12T18:32:31Z"}, {"labels": {"trashed": True}},
+                   {"properties": [{"key": "srSourceId", "value": "other-wav", "visibility": "PRIVATE"}]}]
+        for change in changes:
+            with self.subTest(change=change):
+                self.session.request.reset_mock()
+                self.session.request.return_value = Response(payload=v2_file_meta(target, **change), headers={"ETag": '"v2-version-1"'})
+                with self.assertRaises(cli.TranscriptionError):
+                    self.drive.get_text_update_state(target, "empty")
+                self.session.request.assert_called_once()
+
+    def test_duplicate_or_unrecognized_properties_are_not_silently_lost(self):
+        target = self.text_update_target()
+        for properties in ([{"key": "x", "value": "one", "visibility": "PRIVATE"},
+                            {"key": "x", "value": "two", "visibility": "PRIVATE"}],
+                           [{"key": "x", "value": "one", "visibility": "UNKNOWN"}],
+                           [{"key": "x", "value": None, "visibility": "PUBLIC"}], None, [None]):
+            with self.subTest(properties=properties):
+                self.session.request.reset_mock()
+                self.session.request.return_value = Response(payload=v2_file_meta(target, properties=properties),
+                                                             headers={"ETag": '"v2-version-1"'})
+                with self.assertRaises(cli.TranscriptionError):
+                    self.drive.get_text_update_state(target, "empty")
+                self.session.request.assert_called_once()
+
+    def test_content_edit_aborts_text_state_before_conditional_write(self):
+        target = self.text_update_target()
+        self.session.request.side_effect = [Response(payload=v2_file_meta(target), headers={"ETag": '"v2-version-1"'}),
+                                            Response(content=b"new content")]
+        with self.assertRaises(cli.TranscriptionError):
+            self.drive.get_text_update_state(target, "empty")
+        self.assertEqual(self.session.request.call_count, 2)
+
+    def test_metadata_edit_during_media_read_invalidates_update_state(self):
+        target = self.text_update_target()
+        before = v2_file_meta(target)
+        changed_properties = [dict(prop, value="changed") if prop["key"] == "unrelated" else dict(prop) for prop in before["properties"]]
+        for after in (dict(before, etag='"new-revision"'), dict(before, title="renamed.txt"), dict(before, properties=changed_properties)):
+            with self.subTest(after=after):
+                self.session.request.reset_mock()
+                self.session.request.side_effect = [Response(payload=before, headers={"ETag": before["etag"]}),
+                                                    Response(content=b"empty"), Response(payload=after, headers={"ETag": after["etag"]})]
+                with self.assertRaisesRegex(cli.TranscriptionError, "changed while checking"):
+                    self.drive.get_text_update_state(target, "empty")
+                self.assertEqual(self.session.request.call_count, 3)
+
     def test_download_checksum_failure_retains_the_partial_copy(self):
         self.drive.retries = 0
         self.session.request.return_value = Response(content=b"tampered audio")
@@ -418,23 +549,73 @@ class PublicationTests(unittest.TestCase):
         self.drive.contents = Mock(return_value=[dict(self.target)])
         self.drive.read_text = Mock(return_value="Brak rozpoznanej mowy")
         self.drive.verify_uploaded = Mock(return_value=dict(self.target))
+        self.drive.get_text_update_state = Mock(return_value={"etag": '"v2-version-1"', "properties": []})
         self.drive.request = Mock(return_value=Response())
+        self.session.request.return_value = Response()
+        self.modules = patch.dict(sys.modules, {"requests": FAKE_REQUESTS})
+        self.modules.start()
+        self.addCleanup(self.modules.stop)
 
-    def test_original_transcript_is_archived_before_patch(self):
+    def test_original_transcript_is_archived_before_same_version_conditional_put(self):
         events = []
         self.drive.archive_existing = Mock(side_effect=lambda target: events.append("archive"))
-        self.drive.request.side_effect = lambda *args, **kwargs: (events.append("upload"), Response())[1]
+        self.session.request.side_effect = lambda *args, **kwargs: (events.append("upload"), Response())[1]
         self.drive.publish_text(SOURCE, COMPLETE, [self.target], self.checkpoint)
         self.assertEqual(events, ["archive", "upload"])
-        self.assertEqual(self.drive.request.call_args.args[0], "PATCH")
-        self.assertIn("/txt-1", self.drive.request.call_args.args[1])
-        self.assertEqual(self.drive.request.call_args.kwargs["headers"]["If-Match"], '"version-1"')
+        self.assertEqual(self.session.request.call_args.args, ("PUT", cli.UPLOAD_V2_API + "/txt-1"))
+        self.assertEqual(self.session.request.call_args.kwargs["headers"]["If-Match"], '"v2-version-1"')
+        self.drive.request.assert_not_called()
+
+    def test_v2_put_preserves_public_and_private_properties_and_uses_v2_schema(self):
+        self.drive.archive_existing = Mock()
+        self.drive.get_text_update_state.return_value["properties"] = [
+            {"key": "unrelated", "value": "private value", "visibility": "PRIVATE"},
+            {"key": "unrelated", "value": "public value", "visibility": "PUBLIC"},
+            {"key": "srStatus", "value": "legacy", "visibility": "PUBLIC"},
+            {"key": "srStatus", "value": "empty", "visibility": "PRIVATE"},
+        ]
+        self.drive.publish_text(SOURCE, COMPLETE, [self.target], self.checkpoint)
+        call = self.session.request.call_args
+        body = call.kwargs["data"].decode()
+        metadata = json.loads(body.split("\r\n\r\n", 1)[1].split("\r\n--", 1)[0])
+        self.assertEqual(set(metadata), {"title", "mimeType", "properties"})
+        self.assertEqual(metadata["title"], NAME + ".transkrypcja.txt")
+        props = {(prop["key"], prop["visibility"]): prop["value"] for prop in metadata["properties"]}
+        self.assertEqual(props[("unrelated", "PRIVATE")], "private value")
+        self.assertEqual(props[("unrelated", "PUBLIC")], "public value")
+        self.assertEqual(props[("srStatus", "PUBLIC")], "legacy")
+        self.assertEqual(props[("srStatus", "PRIVATE")], "complete")
+        self.assertEqual(props[("srSourceId", "PRIVATE")], SOURCE["id"])
+        self.assertEqual(props[("srSourceFingerprint", "PRIVATE")], cli.source_fingerprint(SOURCE))
+        self.assertEqual(props[("srEngine", "PRIVATE")], "faster-whisper")
+        self.assertEqual(call.kwargs["params"], {"uploadType": "multipart", "fields": "id", "supportsAllDrives": "true"})
+        self.assertIn(COMPLETE, body)
+        self.assertTrue(call.kwargs["headers"]["Content-Type"].startswith("multipart/related; boundary="))
 
     def test_failed_archival_leaves_original_untouched(self):
         self.drive.archive_existing = Mock(side_effect=cli.TranscriptionError("backup failed"))
         with self.assertRaises(cli.TranscriptionError):
             self.drive.publish_text(SOURCE, COMPLETE, [self.target], self.checkpoint)
         self.drive.request.assert_not_called()
+
+    def test_plain_txt_replacement_succeeds_without_a_v3_etag(self):
+        self.target.pop("_etag")
+        self.drive.contents.return_value = [dict(self.target)]
+        self.drive.archive_existing = Mock()
+        self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
+        self.session.request.assert_called_once()
+        self.assertEqual(self.session.request.call_args.kwargs["headers"]["If-Match"], '"v2-version-1"')
+
+    def test_provenance_or_type_race_during_archival_cannot_be_overwritten(self):
+        self.drive.archive_existing = Mock()
+        for changed in (dict(self.target, appProperties={"srSourceId": "other-recording"}),
+                        dict(self.target, mimeType=cli.DOC_MIME)):
+            with self.subTest(changed=changed):
+                self.drive.get_file.side_effect = [dict(SOURCE), changed]
+                with self.assertRaisesRegex(cli.TranscriptionError, "changed during archival"):
+                    self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
+                self.drive.get_text_update_state.assert_not_called()
+                self.session.request.assert_not_called()
 
     def test_complete_transcript_appearing_during_processing_is_preserved(self):
         self.drive.read_text.return_value = COMPLETE
@@ -468,11 +649,52 @@ class PublicationTests(unittest.TestCase):
 
     def test_etag_conflict_keeps_the_archived_original_and_aborts_update(self):
         self.drive.archive_existing = Mock()
-        self.drive.request.side_effect = cli.DriveError(412, "conditionNotMet")
+        self.session.request.return_value = Response(status=412, payload={"error": {"errors": [{"reason": "conditionNotMet"}]}})
         with self.assertRaises(cli.DriveError):
             self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
         self.drive.archive_existing.assert_called_once()
         self.drive.verify_uploaded.assert_not_called()
+        self.session.request.assert_called_once()
+
+    def test_conditional_timeout_is_reconciled_by_exact_readback_without_replaying_put(self):
+        self.drive.archive_existing = Mock()
+        self.session.request.side_effect = FAKE_REQUESTS.exceptions.Timeout()
+        result = self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
+        self.assertEqual(result, self.target)
+        self.session.request.assert_called_once()
+        self.drive.verify_uploaded.assert_called_once_with("txt-1", COMPLETE, SOURCE)
+
+    def test_unverified_conditional_timeout_remains_blocked_without_replay(self):
+        self.drive.archive_existing = Mock()
+        self.session.request.side_effect = FAKE_REQUESTS.exceptions.Timeout()
+        self.drive.verify_uploaded.side_effect = cli.TranscriptionError("different content")
+        with self.assertRaisesRegex(cli.TranscriptionError, "outcome is uncertain"):
+            self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
+        self.session.request.assert_called_once()
+        self.drive.request.assert_not_called()
+
+    def test_ambiguous_server_error_requires_exact_readback_without_retry(self):
+        self.drive.archive_existing = Mock()
+        self.session.request.return_value = Response(status=503)
+        self.drive.verify_uploaded.side_effect = cli.TranscriptionError("different content")
+        with self.assertRaisesRegex(cli.TranscriptionError, "outcome is uncertain"):
+            self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
+        self.session.request.assert_called_once()
+
+    def test_source_edit_immediately_before_v2_put_leaves_target_untouched(self):
+        self.drive.archive_existing = Mock()
+        self.drive.get_file.side_effect = [dict(SOURCE), dict(self.target), dict(SOURCE, md5Checksum="changed")]
+        with self.assertRaisesRegex(cli.TranscriptionError, "immediately before upload"):
+            self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
+        self.session.request.assert_not_called()
+
+    def test_missing_v2_validator_cannot_fall_back_to_v3_target_etag(self):
+        self.drive.archive_existing = Mock()
+        self.drive.get_text_update_state.side_effect = cli.TranscriptionError("missing strong v2 validator")
+        with self.assertRaisesRegex(cli.TranscriptionError, "missing strong v2 validator"):
+            self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
+        self.session.request.assert_not_called()
+        self.drive.request.assert_not_called()
 
     def test_reserved_upload_id_is_saved_before_create(self):
         self.drive.contents.return_value = []
@@ -485,6 +707,10 @@ class PublicationTests(unittest.TestCase):
         self.drive.publish_text(SOURCE, COMPLETE, [], self.checkpoint)
         self.assertEqual(observed_ids, ["reserved-id"])
         self.assertEqual(self.drive.request.call_args.args[0], "POST")
+        self.assertEqual(self.drive.request.call_args.args[1], cli.UPLOAD_API)
+        self.assertNotIn("If-Match", self.drive.request.call_args.kwargs["headers"])
+        self.assertIn('"appProperties"', self.drive.request.call_args.kwargs["data"].decode())
+        self.drive.get_text_update_state.assert_not_called()
 
     def test_retry_uses_the_saved_reserved_id_instead_of_creating_another(self):
         self.checkpoint.set(SOURCE["id"], {"upload_id": "reserved-id"})
