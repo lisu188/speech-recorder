@@ -48,7 +48,7 @@ def v2_file_meta(file, **extra):
         "modifiedDate": file.get("modifiedTime", ""), "labels": {"trashed": file.get("trashed", False)},
         "etag": '"v2-version-1"',
         "properties": [{"key": key, "value": value, "visibility": "PRIVATE"}
-                       for key, value in file.get("appProperties", {}).items()],
+                       for key, value in (file.get("appProperties") or {}).items()],
     }
     result.update(extra)
     return result
@@ -434,6 +434,37 @@ class DriveApiTests(unittest.TestCase):
         self.assertEqual(state["etag"], '"v2-version-1"')
         self.assertEqual(state["properties"][-1], {"key": "unrelated", "value": "keep public", "visibility": "PUBLIC"})
 
+    def test_reordered_snapshot_properties_and_parents_allow_conditional_replacement(self):
+        target = dict(self.text_update_target(), parents=["folder-1", "folder-2"])
+        before = v2_file_meta(target)
+        before["properties"].append({"key": "unrelated", "value": "keep public", "visibility": "PUBLIC"})
+        after = dict(before, properties=list(reversed(before["properties"])), parents=list(reversed(before["parents"])))
+        self.session.request.side_effect = [Response(payload=before, headers={"ETag": before["etag"]}),
+                                            Response(content=b"empty"), Response(payload=after, headers={"ETag": after["etag"]}), Response()]
+        self.drive.get_file = Mock(side_effect=lambda file_id: dict(SOURCE) if file_id == SOURCE["id"] else dict(target))
+        self.drive.contents = Mock(return_value=[dict(target)])
+        self.drive.read_text = Mock(return_value="empty")
+        self.drive.archive_existing = Mock()
+        self.drive.verify_uploaded = Mock(return_value=dict(target))
+        with tempfile.TemporaryDirectory() as work:
+            result = self.drive.publish_text(SOURCE, COMPLETE, [], cli.CheckpointStore(Path(work)))
+        self.assertEqual(result, target)
+        self.assertEqual(self.session.request.call_count, 4)
+        self.assertEqual(self.session.request.call_args.args, ("PUT", cli.UPLOAD_V2_API + "/txt-1"))
+        self.assertEqual(self.session.request.call_args.kwargs["headers"]["If-Match"], before["etag"])
+        self.drive.verify_uploaded.assert_called_once_with("txt-1", COMPLETE, SOURCE)
+
+    def test_absent_or_null_v3_private_properties_match_empty_v2_properties(self):
+        for include_field, private in ((True, {}), (True, None), (False, None)):
+            with self.subTest(include_field=include_field, private=private):
+                target = dict(self.text_update_target(), appProperties=private)
+                if not include_field:
+                    target.pop("appProperties")
+                meta = v2_file_meta(target)
+                self.session.request.side_effect = [Response(payload=meta, headers={"ETag": meta["etag"]}), Response(content=b"empty"),
+                                                    Response(payload=meta, headers={"ETag": meta["etag"]})]
+                self.assertEqual(self.drive.get_text_update_state(target, "empty")["properties"], [])
+
     def test_missing_weak_or_disagreeing_v2_validators_preserve_target(self):
         target = self.text_update_target()
         for header, body in ((None, '"v2-version-1"'), ('W/"v2-version-1"', 'W/"v2-version-1"'),
@@ -485,7 +516,8 @@ class DriveApiTests(unittest.TestCase):
     def test_metadata_edit_during_media_read_invalidates_update_state(self):
         target = self.text_update_target()
         before = v2_file_meta(target)
-        for after in (dict(before, etag='"new-revision"'), dict(before, title="renamed.txt")):
+        changed_properties = [dict(prop, value="changed") if prop["key"] == "unrelated" else dict(prop) for prop in before["properties"]]
+        for after in (dict(before, etag='"new-revision"'), dict(before, title="renamed.txt"), dict(before, properties=changed_properties)):
             with self.subTest(after=after):
                 self.session.request.reset_mock()
                 self.session.request.side_effect = [Response(payload=before, headers={"ETag": before["etag"]}),

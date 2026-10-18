@@ -490,27 +490,34 @@ class DriveClient:
             if (not isinstance(metadata, dict) or not isinstance(etag, str) or not re.fullmatch(r'"[\x21\x23-\x7e\x80-\xff]+"', etag)
                     or metadata.get("etag") != etag):
                 raise TranscriptionError("Drive did not provide a consistent strong v2 ETag; existing transcript preserved")
-            return metadata, etag
-        metadata, etag = snapshot()
-        properties = []
-        private = {}
-        seen = set()
-        raw_properties = metadata.get("properties", [])
-        if not isinstance(raw_properties, list) or any(not isinstance(prop, dict) for prop in raw_properties):
-            raise TranscriptionError("Drive returned unsafe transcript properties; existing transcript preserved")
-        for prop in raw_properties:
-            key, value, visibility = prop.get("key"), prop.get("value"), prop.get("visibility")
-            if (not isinstance(key, str) or not key or not isinstance(value, str)
-                    or visibility not in ("PRIVATE", "PUBLIC") or (key, visibility) in seen):
+            properties = []
+            seen = set()
+            raw_properties = metadata.get("properties", [])
+            if not isinstance(raw_properties, list) or any(not isinstance(prop, dict) for prop in raw_properties):
                 raise TranscriptionError("Drive returned unsafe transcript properties; existing transcript preserved")
-            seen.add((key, visibility))
-            properties.append({"key": key, "value": value, "visibility": visibility})
-            if visibility == "PRIVATE":
-                private[key] = value
+            for prop in raw_properties:
+                key, value, visibility = prop.get("key"), prop.get("value"), prop.get("visibility")
+                if (not isinstance(key, str) or not key or not isinstance(value, str)
+                        or visibility not in ("PRIVATE", "PUBLIC") or (key, visibility) in seen):
+                    raise TranscriptionError("Drive returned unsafe transcript properties; existing transcript preserved")
+                seen.add((key, visibility))
+                properties.append({"key": key, "value": value, "visibility": visibility})
+            parents, labels = metadata.get("parents", []), metadata.get("labels", {})
+            if (not isinstance(parents, list) or any(not isinstance(parent, dict) or not isinstance(parent.get("id"), str)
+                                                    or not parent["id"] for parent in parents)
+                    or not isinstance(labels, dict)):
+                raise TranscriptionError("Drive returned unsafe transcript identity; existing transcript preserved")
+            parent_ids = [parent["id"] for parent in parents]
+            if len(parent_ids) != len(set(parent_ids)):
+                raise TranscriptionError("Drive returned duplicate transcript parents; existing transcript preserved")
+            # Drive can reorder these arrays without changing the metadata ETag.
+            normalized = dict(metadata, properties=sorted(properties, key=lambda prop: (prop["visibility"], prop["key"])),
+                              parents=[{"id": parent} for parent in sorted(parent_ids)])
+            return normalized, etag
+        metadata, etag = snapshot()
+        properties = metadata["properties"]
+        private = {prop["key"]: prop["value"] for prop in properties if prop["visibility"] == "PRIVATE"}
         parents, labels = metadata.get("parents", []), metadata.get("labels", {})
-        if (not isinstance(parents, list) or any(not isinstance(parent, dict) or not isinstance(parent.get("id"), str) for parent in parents)
-                or not isinstance(labels, dict)):
-            raise TranscriptionError("Drive returned unsafe transcript identity; existing transcript preserved")
         counterpart = {
             "id": metadata.get("id"), "name": metadata.get("title"), "mimeType": metadata.get("mimeType"),
             "parents": [parent["id"] for parent in parents],
@@ -528,7 +535,7 @@ class DriveClient:
                 or set(counterpart["parents"]) != set(checked.get("parents", []))
                 or bool(counterpart["trashed"]) != bool(checked.get("trashed", False))
                 or modified_instant(counterpart["modifiedTime"]) != modified_instant(checked.get("modifiedTime", ""))
-                or private != checked.get("appProperties", {})):
+                or private != (checked.get("appProperties") or {})):
             raise TranscriptionError("Transcript metadata changed before conditional replacement; newest content preserved")
         response = self.request("GET", f"{DRIVE_V2_API}/{checked['id']}",
                                 params={"alt": "media", "supportsAllDrives": "true"})
