@@ -28,10 +28,13 @@ from typing import Any, Iterator
 
 DRIVE_API = "https://www.googleapis.com/drive/v3/files"
 UPLOAD_API = "https://www.googleapis.com/upload/drive/v3/files"
+DRIVE_V2_API = "https://www.googleapis.com/drive/v2/files"
+UPLOAD_V2_API = "https://www.googleapis.com/upload/drive/v2/files"
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 DOC_MIME = "application/vnd.google-apps.document"
 FILE_FIELDS = "id,name,mimeType,parents,size,md5Checksum,modifiedTime,appProperties,trashed"
+TEXT_UPDATE_FIELDS = "id,title,mimeType,parents(id),fileSize,md5Checksum,modifiedDate,labels(trashed),properties(key,value,visibility),etag"
 FULL_RE = re.compile(r"^speech_[a-zA-Z0-9_-]+\.wav$", re.IGNORECASE)
 LIVE_RE = re.compile(r"^__sr_live_(speech_[a-zA-Z0-9_-]+)_part\d{4}\.wav$", re.IGNORECASE)
 STAMP_RE = re.compile(r"\[(\d{2,}:\d{2}:\d{2}(?:[.,]\d{1,3})?)\s*(?:-->|[-–])\s*(\d{2,}:\d{2}:\d{2}(?:[.,]\d{1,3})?)\]\s*(\S.*)")
@@ -470,6 +473,112 @@ class DriveClient:
     def contents(self, folder_id: str) -> list[dict[str, Any]]:
         return self.list_files(f"'{escape_query(folder_id)}' in parents and trashed = false")
 
+    def get_text_update_state(self, checked: dict[str, Any], text: str) -> dict[str, Any]:
+        """Bind the inspected v3 TXT to a strong v2 validator and property set.
+
+        Drive v3 does not expose File.etag. Keep the validator and conditional
+        write in v2; v2 files.update supports patch semantics for omitted fields.
+        """
+        def snapshot() -> tuple[dict[str, Any], str]:
+            response = self.request("GET", f"{DRIVE_V2_API}/{checked['id']}",
+                                    params={"fields": TEXT_UPDATE_FIELDS, "supportsAllDrives": "true"})
+            try:
+                metadata = response.json()
+                etag = response.headers.get("ETag", "")
+            finally:
+                response.close()
+            if (not isinstance(metadata, dict) or not isinstance(etag, str) or not re.fullmatch(r'"[\x21\x23-\x7e\x80-\xff]+"', etag)
+                    or metadata.get("etag") != etag):
+                raise TranscriptionError("Drive did not provide a consistent strong v2 ETag; existing transcript preserved")
+            return metadata, etag
+        metadata, etag = snapshot()
+        properties = []
+        private = {}
+        seen = set()
+        raw_properties = metadata.get("properties", [])
+        if not isinstance(raw_properties, list) or any(not isinstance(prop, dict) for prop in raw_properties):
+            raise TranscriptionError("Drive returned unsafe transcript properties; existing transcript preserved")
+        for prop in raw_properties:
+            key, value, visibility = prop.get("key"), prop.get("value"), prop.get("visibility")
+            if (not isinstance(key, str) or not key or not isinstance(value, str)
+                    or visibility not in ("PRIVATE", "PUBLIC") or (key, visibility) in seen):
+                raise TranscriptionError("Drive returned unsafe transcript properties; existing transcript preserved")
+            seen.add((key, visibility))
+            properties.append({"key": key, "value": value, "visibility": visibility})
+            if visibility == "PRIVATE":
+                private[key] = value
+        parents, labels = metadata.get("parents", []), metadata.get("labels", {})
+        if (not isinstance(parents, list) or any(not isinstance(parent, dict) or not isinstance(parent.get("id"), str) for parent in parents)
+                or not isinstance(labels, dict)):
+            raise TranscriptionError("Drive returned unsafe transcript identity; existing transcript preserved")
+        counterpart = {
+            "id": metadata.get("id"), "name": metadata.get("title"), "mimeType": metadata.get("mimeType"),
+            "parents": [parent["id"] for parent in parents],
+            "size": metadata.get("fileSize", ""), "md5Checksum": metadata.get("md5Checksum", ""),
+            "modifiedTime": metadata.get("modifiedDate", ""), "trashed": labels.get("trashed", False),
+        }
+        # The APIs may serialize the same UTC instant with different precision.
+        def modified_instant(value: str) -> Any:
+            try:
+                return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except (AttributeError, ValueError):
+                return value
+        if (any(str(counterpart.get(key, "")) != str(checked.get(key, ""))
+                for key in ("id", "name", "mimeType", "size", "md5Checksum"))
+                or set(counterpart["parents"]) != set(checked.get("parents", []))
+                or bool(counterpart["trashed"]) != bool(checked.get("trashed", False))
+                or modified_instant(counterpart["modifiedTime"]) != modified_instant(checked.get("modifiedTime", ""))
+                or private != checked.get("appProperties", {})):
+            raise TranscriptionError("Transcript metadata changed before conditional replacement; newest content preserved")
+        response = self.request("GET", f"{DRIVE_V2_API}/{checked['id']}",
+                                params={"alt": "media", "supportsAllDrives": "true"})
+        try:
+            content = response.content
+            if (len(content) > 32 * 1024 * 1024 or str(len(content)) != str(metadata.get("fileSize", ""))
+                    or hashlib.md5(content).hexdigest() != metadata.get("md5Checksum") or content.decode("utf-8-sig") != text):
+                raise TranscriptionError("Transcript content changed before conditional replacement; newest content preserved")
+        except UnicodeDecodeError as exc:
+            raise TranscriptionError("Existing transcript is not UTF-8; preserving it") from exc
+        finally:
+            response.close()
+        # Metadata and media have distinct validators. Read the exact body between
+        # two identical metadata snapshots, then use only that metadata ETag for PUT.
+        after, after_etag = snapshot()
+        if after_etag != etag or after != metadata:
+            raise TranscriptionError("Transcript changed while checking its content; newest content preserved")
+        return {"etag": etag, "properties": properties}
+
+    def replace_text_once(self, file_id: str, text: str, recording: dict[str, Any],
+                          headers: dict[str, str], body: bytes) -> dict[str, Any]:
+        """Never replay an ambiguous conditional mutation with a stale validator."""
+        import requests
+        if STOP.is_set():
+            raise TranscriptionError("Interrupted; checkpoint and local copies were preserved")
+        uncertain = False
+        try:
+            with self._mutex:
+                response = self.session.request("PUT", f"{UPLOAD_V2_API}/{file_id}",
+                                                params={"uploadType": "multipart", "fields": "id", "supportsAllDrives": "true"},
+                                                headers=headers, data=body, timeout=(30, 180))
+        except requests.exceptions.RequestException:
+            uncertain = True
+        else:
+            try:
+                if not 200 <= response.status_code < 300:
+                    reason = self._reason(response)
+                    uncertain = response.status_code in (408, 429, 500, 502, 503, 504) or (
+                        response.status_code == 403 and reason in ("rateLimitExceeded", "userRateLimitExceeded", "backendError"))
+                    if not uncertain:
+                        raise DriveError(response.status_code, reason)
+            finally:
+                response.close()
+        try:
+            return self.verify_uploaded(file_id, text, recording)
+        except TranscriptionError as exc:
+            if not uncertain:
+                raise
+            raise TranscriptionError("Conditional transcript replacement outcome is uncertain; exact readback did not verify, local copies preserved") from exc
+
     def read_text(self, file: dict[str, Any]) -> str:
         if file.get("mimeType") == DOC_MIME:
             response = self.request("GET", f"{DRIVE_API}/{file['id']}/export", params={"mimeType": "text/plain"})
@@ -656,12 +765,11 @@ class DriveClient:
             self.archive_existing(target)
             # Detect an edit between copying and overwriting, including same-size edits.
             rechecked = self.get_file(target["id"])
-            if source_fingerprint(rechecked) != source_fingerprint(target) or self.read_text(rechecked) != target_text:
+            if (source_fingerprint(rechecked) != source_fingerprint(target) or rechecked.get("mimeType") != "text/plain"
+                    or rechecked.get("appProperties", {}) != target.get("appProperties", {}) or self.read_text(rechecked) != target_text):
                 raise TranscriptionError("Existing transcript changed during archival; preserving its newest content")
-            if not rechecked.get("_etag"):
-                raise TranscriptionError("Drive did not provide an ETag for safe conditional transcript replacement; existing document preserved")
+            update_state = self.get_text_update_state(rechecked, target_text)
             file_id = target["id"]
-            method, url = "PATCH", f"{UPLOAD_API}/{file_id}"
         else:
             record = checkpoint.get(recording["id"]) or {}
             file_id = record.get("upload_id")
@@ -679,7 +787,13 @@ class DriveClient:
         properties = {"srSourceId": recording["id"], "srSourceFingerprint": source_fingerprint(recording),
                       "srStatus": "empty" if classify_transcript(text) == "empty" else "complete", "srEngine": "faster-whisper"}
         metadata: dict[str, Any] = {"name": expected_transcript_name(recording["name"]), "mimeType": "text/plain", "appProperties": properties}
-        if not target:
+        if target:
+            preserved = {(prop["key"], prop["visibility"]): prop for prop in update_state["properties"]}
+            preserved.update({(key, "PRIVATE"): {"key": key, "value": value, "visibility": "PRIVATE"}
+                              for key, value in properties.items()})
+            metadata = {"title": expected_transcript_name(recording["name"]), "mimeType": "text/plain",
+                        "properties": list(preserved.values())}
+        else:
             metadata.update(id=file_id, parents=[parent])
         boundary = "speech_recorder_" + hashlib.sha256((file_id + text).encode()).hexdigest()[:24]
         body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n" +
@@ -687,9 +801,11 @@ class DriveClient:
                 text + f"\r\n--{boundary}--\r\n").encode("utf-8")
         headers = {"Content-Type": f"multipart/related; boundary={boundary}"}
         if target:
-            headers["If-Match"] = rechecked["_etag"]
+            headers["If-Match"] = update_state["etag"]
         if source_fingerprint(self.get_file(recording["id"])) != source_fingerprint(recording):
             raise TranscriptionError("Original WAV changed immediately before upload; local WAV preserved")
+        if target:
+            return self.replace_text_once(file_id, text, recording, headers, body)
         try:
             response = self.request(method, url, params={"uploadType": "multipart", "fields": FILE_FIELDS, "supportsAllDrives": "true"},
                                     headers=headers, data=body)
