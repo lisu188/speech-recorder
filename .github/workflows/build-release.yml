@@ -68,7 +68,7 @@ jobs:
         run: |
           bash -n scripts/sign-apk.sh
           bash scripts/test-sign-apk.sh
-          gradle --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease :app:assembleStandalone
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease :app:assembleStandalone
 
       - uses: actions/upload-artifact@v4
         if: always()
