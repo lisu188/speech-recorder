@@ -41,7 +41,7 @@ jobs:
       - name: Archive build source
         run: git archive --format=zip --output=SpeechRecorder-source.zip HEAD
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SpeechRecorder-Source
           path: SpeechRecorder-source.zip
@@ -70,7 +70,7 @@ jobs:
           bash scripts/test-sign-apk.sh
           ./gradlew --no-daemon :app:testDebugUnitTest :app:lintRelease :app:assembleRelease :app:assembleStandalone
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: SpeechRecorder-Test-Reports
@@ -83,7 +83,7 @@ jobs:
       - name: Prepare local signing verifier
         run: cp "$ANDROID_HOME/build-tools/37.0.0/lib/apksigner.jar" apksigner.jar
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SpeechRecorder-APK-Signer
           path: apksigner.jar
@@ -92,13 +92,13 @@ jobs:
       - name: Prepare unsigned artifact
         run: cp app/build/outputs/apk/release/app-release-unsigned.apk SpeechRecorder-release-unsigned.apk
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SpeechRecorder-Standalone-Unsigned
           path: app/build/outputs/apk/standalone/app-standalone-unsigned.apk
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SpeechRecorder-Release-Unsigned
           path: SpeechRecorder-release-unsigned.apk
@@ -185,7 +185,7 @@ jobs:
           (cd delivery && sha256sum --check *.sha256)
           echo 'Both APK variants passed signature verification and match their pinned existing certificates.' >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SpeechRecorder-Release-Signed
           path: |
@@ -193,7 +193,7 @@ jobs:
             delivery/SpeechRecorder-release.apk.sha256
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: SpeechRecorder-Standalone-Signed
           path: |
