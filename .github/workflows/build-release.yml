@@ -119,17 +119,17 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: SpeechRecorder-APK-Signer
           path: signing-tools
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: SpeechRecorder-Release-Unsigned
           path: unsigned/release
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: SpeechRecorder-Standalone-Unsigned
           path: unsigned/standalone
