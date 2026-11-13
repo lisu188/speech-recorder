@@ -134,7 +134,6 @@ class RecorderService : Service() {
             .setContentTitle("Dyktafon działa w tle")
             .setContentText(if (speechActive) "Nagrywanie mowy" else "Nasłuchiwanie mikrofonu")
             .setOngoing(true)
-            .setSilent(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setCategory(Notification.CATEGORY_SERVICE)
