@@ -1,5 +1,5 @@
 # Local inference only; audio is never submitted to a transcription service.
-faster-whisper>=1.2,<2
+faster-whisper>=1.2.1,<2
 google-auth>=2.62.1,<3
 google-auth-oauthlib>=1.2,<2
 requests>=2.34.2,<3
