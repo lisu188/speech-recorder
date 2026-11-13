@@ -52,6 +52,6 @@ dependencies {
     implementation("androidx.work:work-runtime:2.12.0")
     implementation("com.google.android.gms:play-services-auth:22.0.0")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("org.robolectric:robolectric:4.17")
     testImplementation("androidx.work:work-testing:2.12.0")
 }
